@@ -40,6 +40,23 @@ export {
 
 type Permission = "ask" | "allow" | "deny"
 
+export type CompactionOverride = Partial<Omit<CompactionConfig, "custom">> & {
+    custom?: Partial<CompactionConfig["custom"]>
+    /** null clears an inherited absolute budget and restores percentage behavior. */
+    triggerTokens?: number | null
+    targetTokens?: number | null
+}
+
+export type ProviderCompactionOverride = CompactionOverride & {
+    models?: Record<string, CompactionOverride>
+}
+
+export type ScopedCompactionConfig = CompactionConfig & {
+    triggerTokens?: number | null
+    targetTokens?: number | null
+    providers?: Record<string, ProviderCompactionOverride>
+}
+
 export interface CompressConfig {
     permission: Permission
 }
@@ -57,7 +74,7 @@ export interface PluginConfig {
     autoUpdate: boolean
     debug: boolean
     commands: Commands
-    compaction: CompactionConfig
+    compaction: ScopedCompactionConfig
     experimental: ExperimentalConfig
     compress: CompressConfig
 }
@@ -75,6 +92,8 @@ export const VALID_CONFIG_KEYS = new Set([
     "compaction.automatic",
     "compaction.preset",
     "compaction.summaryEffort",
+    "compaction.triggerTokens",
+    "compaction.targetTokens",
     "compaction.custom",
     "compaction.custom.triggerPercent",
     "compaction.custom.targetPercent",
@@ -100,8 +119,52 @@ function getConfigKeyPaths(obj: Record<string, any>, prefix = ""): string[] {
 }
 
 export function getInvalidConfigKeys(userConfig: Record<string, any>): string[] {
-    const userKeys = getConfigKeyPaths(userConfig)
-    return userKeys.filter((key) => !VALID_CONFIG_KEYS.has(key))
+    const { providers, ...compaction } = userConfig.compaction ?? {}
+    const plain = userConfig.compaction ? { ...userConfig, compaction } : userConfig
+    const invalid = getConfigKeyPaths(plain).filter((key) => !VALID_CONFIG_KEYS.has(key))
+    visitOverrides(providers, (override, prefix) => {
+        for (const key of getConfigKeyPaths(override)) {
+            if (!VALID_CONFIG_KEYS.has(`compaction.${key}`)) invalid.push(`${prefix}.${key}`)
+        }
+    })
+    return invalid
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function visitOverrides(
+    providers: unknown,
+    visit: (override: Record<string, any>, prefix: string) => void,
+    invalid?: (path: string) => void,
+) {
+    if (providers === undefined) return
+    if (!isRecord(providers)) {
+        invalid?.("compaction.providers")
+        return
+    }
+    for (const [id, provider] of Object.entries(providers)) {
+        const prefix = `compaction.providers.${id}`
+        if (!isRecord(provider)) {
+            invalid?.(prefix)
+            continue
+        }
+        const { models, ...override } = provider
+        visit(override, prefix)
+        if (models === undefined) continue
+        if (!isRecord(models)) {
+            invalid?.(`${prefix}.models`)
+            continue
+        }
+        for (const [model, value] of Object.entries(models)) {
+            if (!isRecord(value)) {
+                invalid?.(`${prefix}.models.${model}`)
+                continue
+            }
+            visit(value, `${prefix}.models.${model}`)
+        }
+    }
 }
 
 interface ValidationError {
@@ -112,6 +175,42 @@ interface ValidationError {
 
 export function validateConfigTypes(config: Record<string, any>): ValidationError[] {
     const errors: ValidationError[] = []
+    for (const key of ["triggerTokens", "targetTokens"] as const) {
+        const value = config.compaction?.[key]
+        if (value !== undefined && value !== null && (!Number.isSafeInteger(value) || value <= 0)) {
+            errors.push({
+                key: `compaction.${key}`,
+                expected: "positive safe integer or null",
+                actual: String(value),
+            })
+        }
+    }
+    visitOverrides(
+        config.compaction?.providers,
+        (override, prefix) => {
+            // Only recognized scalar settings are validated recursively. Unknown nested
+            // override keys are rejected separately, never recursively interpreted.
+            const scoped = Object.fromEntries(
+                Object.entries(override).filter(([key]) =>
+                    [
+                        "automatic",
+                        "preset",
+                        "summaryEffort",
+                        "custom",
+                        "triggerTokens",
+                        "targetTokens",
+                    ].includes(key),
+                ),
+            )
+            errors.push(
+                ...validateConfigTypes({ compaction: scoped }).map((error) => ({
+                    ...error,
+                    key: prefix + error.key.slice("compaction".length),
+                })),
+            )
+        },
+        (key) => errors.push({ key, expected: "object", actual: "non-object" }),
+    )
 
     if (config.enabled !== undefined && typeof config.enabled !== "boolean") {
         errors.push({ key: "enabled", expected: "boolean", actual: typeof config.enabled })
@@ -569,9 +668,9 @@ function mergeCommands(
     }
 }
 
-function mergeCompaction(
+export function mergeCompaction(
     base: PluginConfig["compaction"],
-    override?: Partial<PluginConfig["compaction"]>,
+    override?: CompactionOverride & { providers?: ScopedCompactionConfig["providers"] },
 ): PluginConfig["compaction"] {
     if (!override) return base
     return {
@@ -582,6 +681,86 @@ function mergeCompaction(
             ...base.custom,
             ...(override.custom ?? {}),
         }),
+        ...(base.triggerTokens !== undefined || override.triggerTokens !== undefined
+            ? {
+                  triggerTokens:
+                      override.triggerTokens !== undefined
+                          ? override.triggerTokens
+                          : base.triggerTokens,
+              }
+            : {}),
+        ...(base.targetTokens !== undefined || override.targetTokens !== undefined
+            ? {
+                  targetTokens:
+                      override.targetTokens !== undefined
+                          ? override.targetTokens
+                          : base.targetTokens,
+              }
+            : {}),
+        ...(base.providers || override.providers
+            ? { providers: mergeProviders(base.providers, override.providers) }
+            : {}),
+    }
+}
+
+function mergeOverride(
+    base: CompactionOverride = {},
+    override: CompactionOverride = {},
+): CompactionOverride {
+    return {
+        ...base,
+        ...override,
+        ...(base.custom || override.custom
+            ? { custom: { ...base.custom, ...override.custom } }
+            : {}),
+    }
+}
+
+function mergeProviders(
+    base: ScopedCompactionConfig["providers"] = {},
+    override: ScopedCompactionConfig["providers"] = {},
+): NonNullable<ScopedCompactionConfig["providers"]> {
+    return Object.fromEntries(
+        [...new Set([...Object.keys(base), ...Object.keys(override)])].map((id) => {
+            const a = Object.hasOwn(base, id) ? base[id]! : {}
+            const b = Object.hasOwn(override, id) ? override[id]! : {}
+            const models = Object.fromEntries(
+                [...new Set([...Object.keys(a.models ?? {}), ...Object.keys(b.models ?? {})])].map(
+                    (model) => [
+                        model,
+                        mergeOverride(
+                            a.models && Object.hasOwn(a.models, model)
+                                ? a.models[model]
+                                : undefined,
+                            b.models && Object.hasOwn(b.models, model)
+                                ? b.models[model]
+                                : undefined,
+                        ),
+                    ],
+                ),
+            )
+            return [id, { ...mergeOverride(a, b), models }]
+        }),
+    )
+}
+
+/** Resolve per request, never mutate global config or leak settings across sessions. */
+export function resolveModelConfig(
+    config: PluginConfig,
+    providerId?: string,
+    modelId?: string,
+): PluginConfig {
+    const providers = config.compaction.providers
+    const provider =
+        providerId && providers && Object.hasOwn(providers, providerId)
+            ? providers[providerId]
+            : undefined
+    if (!provider) return config
+    const { models, ...providerSettings } = provider
+    const model = modelId && models && Object.hasOwn(models, modelId) ? models[modelId] : undefined
+    return {
+        ...config,
+        compaction: mergeCompaction(mergeCompaction(config.compaction, providerSettings), model),
     }
 }
 
@@ -605,6 +784,15 @@ function deepCloneConfig(config: PluginConfig): PluginConfig {
             preset: config.compaction.preset,
             summaryEffort: config.compaction.summaryEffort,
             custom: { ...config.compaction.custom },
+            ...(config.compaction.triggerTokens !== undefined
+                ? { triggerTokens: config.compaction.triggerTokens }
+                : {}),
+            ...(config.compaction.targetTokens !== undefined
+                ? { targetTokens: config.compaction.targetTokens }
+                : {}),
+            ...(config.compaction.providers
+                ? { providers: structuredClone(config.compaction.providers) }
+                : {}),
         },
         experimental: { ...config.experimental },
         compress: { ...config.compress },

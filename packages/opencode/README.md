@@ -1,5 +1,45 @@
 # Better Compact for OpenCode
 
+## Provider/model compaction overrides (fork)
+
+In `better-compact.jsonc`, settings inherit **field by field**: model override,
+then provider override, then global compaction settings. Unspecified fields keep
+their inherited values. IDs are exact OpenCode provider/model IDs, not wildcards.
+
+```jsonc
+{
+  "compaction": {
+    "preset": "custom",
+    "custom": { "triggerPercent": 85, "targetPercent": 35 },
+    "providers": {
+      "runpod": {
+        "custom": { "summarizerConcurrency": 3 },
+        "models": {
+          "qwen3.8-27b-ud-q6-k-m": { "triggerTokens": 181000 }
+        }
+      }
+    }
+  }
+}
+```
+
+`triggerTokens` and `targetTokens` are optional positive safe integers that
+override percentage budgets, including with named presets. `null` clears an
+inherited absolute budget and restores percentage behavior. To replace an
+inherited token budget with a percentage, clear that token field explicitly.
+Partial `custom` settings and scoped `automatic`, `preset`, and `summaryEffort`
+inherit normally. Global/config-directory/project layers deep-merge scoped
+entries. The global-settings UI preserves these JSONC entries; edit scoped
+overrides in the file.
+
+These settings belong to Better Compact, not an unsupported OpenCode provider
+`compaction` property. Keep the model's real per-request `limit.context`
+accurate. Token budgets do not expand that window. Triggering starts planning;
+turn boundaries, estimates, protected history and pruning eligibility still
+affect when compaction occurs and whether it reaches the target.
+
+This fork retains the upstream AGPL-3.0-or-later license.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/AshishKumar4/Better-Compact/main/assets/readme/hero.svg" alt="Better Compact staged context pruning." width="100%">
 </p>

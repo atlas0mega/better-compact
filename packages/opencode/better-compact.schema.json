@@ -52,25 +52,13 @@
                 },
                 "preset": {
                     "type": "string",
-                    "enum": [
-                        "light",
-                        "moderate",
-                        "max",
-                        "custom"
-                    ],
+                    "enum": ["light", "moderate", "max", "custom"],
                     "default": "light",
                     "description": "Compaction strength. light is Gentle, moderate is Balanced, max is Aggressive, and custom uses compaction.custom."
                 },
                 "summaryEffort": {
                     "type": "string",
-                    "enum": [
-                        "inherit",
-                        "low",
-                        "medium",
-                        "high",
-                        "max",
-                        "off"
-                    ],
+                    "enum": ["inherit", "low", "medium", "high", "max", "off"],
                     "default": "inherit",
                     "description": "Reasoning effort for scratch summaries. Unsupported effort levels fall back to the model default."
                 },
@@ -119,6 +107,109 @@
                             "description": "Ceiling on how much of the old context one pass may replace with assistant summaries."
                         }
                     }
+                },
+                "triggerTokens": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Exact automatic-compaction trigger token budget; overrides percentage. null restores percentage behavior."
+                },
+                "targetTokens": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Exact post-compaction target token budget; overrides percentage. null restores percentage behavior."
+                },
+                "providers": {
+                    "type": "object",
+                    "description": "Exact provider IDs; per-field model overrides take precedence over provider and global values.",
+                    "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "automatic": {
+                                "type": "boolean",
+                                "default": true,
+                                "description": "Automatically create a Better Compact plan when context reaches the selected trigger."
+                            },
+                            "preset": {
+                                "type": "string",
+                                "enum": ["light", "moderate", "max", "custom"],
+                                "default": "light",
+                                "description": "Compaction strength. light is Gentle, moderate is Balanced, max is Aggressive, and custom uses compaction.custom."
+                            },
+                            "summaryEffort": {
+                                "type": "string",
+                                "enum": ["inherit", "low", "medium", "high", "max", "off"],
+                                "default": "inherit",
+                                "description": "Reasoning effort for scratch summaries. Unsupported effort levels fall back to the model default."
+                            },
+                            "custom": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "triggerPercent": {
+                                        "type": "number",
+                                        "minimum": 1,
+                                        "maximum": 99,
+                                        "default": 85,
+                                        "description": "Automatic compaction starts at this context usage percentage. Heavier stages stop once usage falls below it."
+                                    },
+                                    "targetPercent": {
+                                        "type": "number",
+                                        "minimum": 1,
+                                        "maximum": 99,
+                                        "default": 35,
+                                        "description": "Deep summary goal used when pruning tool output is not enough."
+                                    },
+                                    "recentToolTokens": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 200000,
+                                        "default": 40000,
+                                        "description": "Recent tool-call/result budget to keep verbatim. Older output remains available through transcript references."
+                                    },
+                                    "summarizerConcurrency": {
+                                        "type": "number",
+                                        "minimum": 1,
+                                        "maximum": 16,
+                                        "default": 4,
+                                        "description": "Advanced maximum number of scratch summarizer sessions to run in parallel."
+                                    },
+                                    "prefixSummary": {
+                                        "type": "boolean",
+                                        "default": false,
+                                        "description": "Allow the last-resort prefix summary when pruning alone cannot reach the target."
+                                    },
+                                    "collapsePercent": {
+                                        "type": "number",
+                                        "minimum": 1,
+                                        "maximum": 99,
+                                        "default": 25,
+                                        "description": "Ceiling on how much of the old context one pass may replace with assistant summaries."
+                                    }
+                                }
+                            },
+                            "triggerTokens": {
+                                "type": ["integer", "null"],
+                                "minimum": 1,
+                                "maximum": 9007199254740991,
+                                "description": "Exact automatic-compaction trigger token budget; overrides percentage. null restores percentage behavior."
+                            },
+                            "targetTokens": {
+                                "type": ["integer", "null"],
+                                "minimum": 1,
+                                "maximum": 9007199254740991,
+                                "description": "Exact post-compaction target token budget; overrides percentage. null restores percentage behavior."
+                            },
+                            "models": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "$ref": "#/definitions/compactionOverride"
+                                }
+                            }
+                        }
+                    }
                 }
             },
             "default": {
@@ -157,17 +248,96 @@
             "properties": {
                 "permission": {
                     "type": "string",
-                    "enum": [
-                        "ask",
-                        "allow",
-                        "deny"
-                    ],
+                    "enum": ["ask", "allow", "deny"],
                     "default": "allow",
                     "description": "Permission mode for Better Compact commands"
                 }
             },
             "default": {
                 "permission": "allow"
+            }
+        }
+    },
+    "definitions": {
+        "compactionOverride": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "automatic": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically create a Better Compact plan when context reaches the selected trigger."
+                },
+                "preset": {
+                    "type": "string",
+                    "enum": ["light", "moderate", "max", "custom"],
+                    "default": "light",
+                    "description": "Compaction strength. light is Gentle, moderate is Balanced, max is Aggressive, and custom uses compaction.custom."
+                },
+                "summaryEffort": {
+                    "type": "string",
+                    "enum": ["inherit", "low", "medium", "high", "max", "off"],
+                    "default": "inherit",
+                    "description": "Reasoning effort for scratch summaries. Unsupported effort levels fall back to the model default."
+                },
+                "custom": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "triggerPercent": {
+                            "type": "number",
+                            "minimum": 1,
+                            "maximum": 99,
+                            "default": 85,
+                            "description": "Automatic compaction starts at this context usage percentage. Heavier stages stop once usage falls below it."
+                        },
+                        "targetPercent": {
+                            "type": "number",
+                            "minimum": 1,
+                            "maximum": 99,
+                            "default": 35,
+                            "description": "Deep summary goal used when pruning tool output is not enough."
+                        },
+                        "recentToolTokens": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 200000,
+                            "default": 40000,
+                            "description": "Recent tool-call/result budget to keep verbatim. Older output remains available through transcript references."
+                        },
+                        "summarizerConcurrency": {
+                            "type": "number",
+                            "minimum": 1,
+                            "maximum": 16,
+                            "default": 4,
+                            "description": "Advanced maximum number of scratch summarizer sessions to run in parallel."
+                        },
+                        "prefixSummary": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Allow the last-resort prefix summary when pruning alone cannot reach the target."
+                        },
+                        "collapsePercent": {
+                            "type": "number",
+                            "minimum": 1,
+                            "maximum": 99,
+                            "default": 25,
+                            "description": "Ceiling on how much of the old context one pass may replace with assistant summaries."
+                        }
+                    }
+                },
+                "triggerTokens": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Exact automatic-compaction trigger token budget; overrides percentage. null restores percentage behavior."
+                },
+                "targetTokens": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Exact post-compaction target token budget; overrides percentage. null restores percentage behavior."
+                }
             }
         }
     }

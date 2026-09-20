@@ -35,7 +35,9 @@ export async function processBoundaryTransform(input: {
             load: () => input.state.boundary.activePlan,
             save: async (_sessionKey, snapshot) => {
                 const previous = input.state.boundary.activePlan
-                input.state.boundary.activePlan = snapshot ? stampForkIdentity(snapshot, input.messages) : null
+                input.state.boundary.activePlan = snapshot
+                    ? stampForkIdentity(snapshot, input.messages)
+                    : null
                 try {
                     await saveSessionState(input.state, input.logger)
                 } catch (error) {
@@ -54,6 +56,8 @@ export async function processBoundaryTransform(input: {
         contextLimit: input.state.modelContextLimit,
         triggerRatio: profile.triggerPercent / 100,
         targetRatio: profile.targetPercent / 100,
+        triggerTokens: input.config.compaction.triggerTokens ?? undefined,
+        targetTokens: input.config.compaction.targetTokens ?? undefined,
         recentToolResultBudgetTokens: profile.recentToolTokens,
         providerReportedTokens: input.providerReportedTokens,
         summariesAllowed: input.summariesAllowed,
@@ -68,7 +72,9 @@ export async function processBoundaryTransform(input: {
 
 function stampForkIdentity(snapshot: PlanSnapshot, messages: WithParts[]) {
     if (snapshot.rawTailItemBoundary !== undefined) return snapshot
-    const tailIndex = messages.findIndex((message) => message.info.id === snapshot.rawTailStartMessageId)
+    const tailIndex = messages.findIndex(
+        (message) => message.info.id === snapshot.rawTailStartMessageId,
+    )
     if (tailIndex <= 0) return snapshot
     const prefix = messages.slice(0, tailIndex)
     return {

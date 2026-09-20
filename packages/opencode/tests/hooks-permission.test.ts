@@ -178,13 +178,10 @@ test("chat message transform strips hallucinated tags even when compress is deni
     const config = buildConfig("deny")
     const client = { session: { get: async () => ({}) }, provider: { list: async () => [] } }
     const runtime = createRuntimeState(client, logger)
-    const handler = createChatMessageTransformHandler(
-        client as any,
-        runtime,
-        logger,
-        config,
-        { global: undefined, agents: {} },
-    )
+    const handler = createChatMessageTransformHandler(client as any, runtime, logger, config, {
+        global: undefined,
+        agents: {},
+    })
     const output = {
         messages: [buildMessage("assistant-1", "assistant", "alpha <dcp>beta</dcp> omega")],
     }
@@ -200,13 +197,10 @@ test("chat message transform drops messages without info instead of crashing", a
     const config = buildConfig("deny")
     const client = { session: { get: async () => ({}) }, provider: { list: async () => [] } }
     const runtime = createRuntimeState(client, logger)
-    const handler = createChatMessageTransformHandler(
-        client as any,
-        runtime,
-        logger,
-        config,
-        { global: undefined, agents: {} },
-    )
+    const handler = createChatMessageTransformHandler(client as any, runtime, logger, config, {
+        global: undefined,
+        agents: {},
+    })
     const output = {
         messages: [
             {
@@ -317,7 +311,12 @@ test("auto transform path honors the configured compaction profile", async () =>
         automatic: true,
         preset: "custom",
         summaryEffort: "inherit",
-        custom: { triggerPercent: 5, targetPercent: 3, recentToolTokens: 0, summarizerConcurrency: 4 },
+        custom: {
+            triggerPercent: 5,
+            targetPercent: 3,
+            recentToolTokens: 0,
+            summarizerConcurrency: 4,
+        },
     }
     const handler = transformHandler(
         client,
@@ -328,7 +327,10 @@ test("auto transform path honors the configured compaction profile", async () =>
 
     await handler({}, { messages })
 
-    assert.ok(state.boundary.activePlan, "custom low trigger must produce a plan where the default would not")
+    assert.ok(
+        state.boundary.activePlan,
+        "custom low trigger must produce a plan where the default would not",
+    )
     assert.equal(state.boundary.activePlan.triggerTokens, Math.floor(200_000 * 0.05))
 
     const controlSessionId = `${sessionId}-control`
@@ -430,6 +432,45 @@ test("automatic compaction triggers from provider usage when the local estimate 
     assert.ok(state.boundary.activePlan)
     assert.equal(state.boundary.activePlan.beforeTokens, 90_000)
     assert.equal(toasts.length, 1)
+})
+
+test("automatic hook uses exact model budgets and falls back for other models", async () => {
+    for (const [tokens, model, expected] of [
+        [180999, "claude-test", false],
+        [181000, "claude-test", true],
+        [181000, "other", false],
+    ] as const) {
+        const sessionID = `override-${model}-${tokens}-${process.pid}`
+        const client = transformClient(262144, [])
+        const runtime = createRuntimeState(client, new Logger(false))
+        runtime.setModelLimit("anthropic", model, 262144)
+        const config = buildConfig("allow")
+        config.compaction.providers = {
+            anthropic: {
+                triggerTokens: 200000,
+                models: { "claude-test": { triggerTokens: 181000, targetTokens: 90000 } },
+            },
+        }
+        const handler = transformHandler(
+            client,
+            runtime,
+            config,
+            mkdtempSync(join(tmpdir(), "better-compact-override-")),
+        )
+        const messages = [
+            buildUserMessage("user-1", "old request", 1, sessionID),
+            buildAssistantToolMessage("assistant-1", 2, undefined, sessionID),
+            buildUserMessage("user-2", "middle request", 3, sessionID),
+            buildAssistantToolMessage("assistant-2", 4, tokens, sessionID),
+            buildUserMessage("user-3", "latest request", 5, sessionID),
+        ]
+        for (const message of messages)
+            if (message.info.role === "user") (message.info as any).model.modelID = model
+        await handler({}, { messages })
+        const plan = runtime.get(sessionID).boundary.activePlan
+        assert.equal(Boolean(plan), expected)
+        if (plan) assert.equal(plan.targetTokens, 90000)
+    }
 })
 
 test("concurrent automatic transforms share one committed plan", async () => {
@@ -544,7 +585,10 @@ test("auto transform path degrades to an unpruned request when the transcript wr
     const messages = buildOverTriggerConversation(sessionId)
     const client = transformClient(10_000)
     const runtime = createRuntimeState(client, new Logger(false))
-    const brokenDirectory = join(mkdtempSync(join(tmpdir(), "better-compact-broken-")), "not-a-directory")
+    const brokenDirectory = join(
+        mkdtempSync(join(tmpdir(), "better-compact-broken-")),
+        "not-a-directory",
+    )
     writeFileSync(brokenDirectory, "regular file blocking mkdir")
     const handler = transformHandler(client, runtime, buildConfig("allow"), brokenDirectory)
     const output = { messages }
@@ -616,7 +660,10 @@ test("command execute exits after effective permission resolves to deny", async 
         { global: undefined, agents: {} },
     )
 
-    await handler({ command: "better-compact", sessionID: "session-1", arguments: "context" }, output)
+    await handler(
+        { command: "better-compact", sessionID: "session-1", arguments: "context" },
+        output,
+    )
 
     assert.equal(sessionMessagesCalls, 1)
     assert.deepEqual(output.parts, [])
@@ -666,9 +713,18 @@ test("better-compact stores virtual plan and reports progress without native sum
     assert.ok(state.boundary.activePlan)
     assert.equal(state.boundary.activePlan?.sessionId, "session-1")
     assert.ok(prompts.length >= 1)
-    assert.equal(prompts.every((prompt) => prompt.body.noReply === true), true)
-    assert.equal(prompts.every((prompt) => prompt.body.parts[0].ignored === true), true)
-    assert.match(prompts.map((prompt) => prompt.body.parts[0].text).join("\n"), /Better Compact Complete/)
+    assert.equal(
+        prompts.every((prompt) => prompt.body.noReply === true),
+        true,
+    )
+    assert.equal(
+        prompts.every((prompt) => prompt.body.parts[0].ignored === true),
+        true,
+    )
+    assert.match(
+        prompts.map((prompt) => prompt.body.parts[0].text).join("\n"),
+        /Better Compact Complete/,
+    )
     assert.equal(state.boundary.job?.percent, 100)
     assert.equal(state.boundary.job?.counters.contextLimit, 200_000)
     assert.ok((state.boundary.job?.counters.beforeTokens ?? 0) > 0)
@@ -710,10 +766,16 @@ test("concurrent better-compact runs for a session are rejected while one is in 
 
     // The first run blocks in its deferred final-report prompt; the second
     // must be turned away by the single-flight guard without starting a job.
-    const first = handler({ command: "better-compact", sessionID: "session-1", arguments: "" }, { parts: [] as any[] })
+    const first = handler(
+        { command: "better-compact", sessionID: "session-1", arguments: "" },
+        { parts: [] as any[] },
+    )
     await first
     await waitFor(() => prompts.length === 1)
-    const second = handler({ command: "better-compact", sessionID: "session-1", arguments: "" }, { parts: [] as any[] })
+    const second = handler(
+        { command: "better-compact", sessionID: "session-1", arguments: "" },
+        { parts: [] as any[] },
+    )
     await waitFor(() => prompts.length === 2)
     releases.splice(0).forEach((release) => release())
     await second
@@ -798,14 +860,21 @@ test("chat message sentinel runs better-compact as no-reply TUI action", async (
         ),
         true,
     )
-    assert.match(prompts.map((prompt) => prompt.body.parts[0].text).join("\n"), /Better Compact Complete/)
+    assert.match(
+        prompts.map((prompt) => prompt.body.parts[0].text).join("\n"),
+        /Better Compact Complete/,
+    )
     assert.equal(state.boundary.job?.percent, 100)
     assert.equal(state.boundary.job?.id, "bc_tuitest")
     assert.equal(state.boundary.job?.startedAt, 123_456)
     assert.equal(state.boundary.job?.counters.contextLimit, 1_000_000)
     assert.equal(state.boundary.job?.counters.beforeTokens, 857_703)
     assert.ok((state.boundary.job?.counters.currentTokens ?? 0) > 0)
-    assert.ok(state.boundary.job?.stages.some((stage) => stage.id === "report" && stage.status === "completed"))
+    assert.ok(
+        state.boundary.job?.stages.some(
+            (stage) => stage.id === "report" && stage.status === "completed",
+        ),
+    )
 })
 
 test("denied TUI compaction persists a correlated failed job", async () => {
@@ -883,7 +952,9 @@ async function persistForkSourcePlan(directory: string, prefix: WithParts[]): Pr
     const transcriptRelativePath = ".opencode/better-compact/sessions/fork-source/plan.md"
     mkdirSync(join(directory, ".opencode/better-compact/sessions/fork-source"), { recursive: true })
     writeFileSync(join(directory, transcriptRelativePath), "source transcript")
-    const source = createSessionState(`fork-source-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    const source = createSessionState(
+        `fork-source-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    )
     source.boundary.activePlan = {
         sessionId: source.sessionId!,
         rangeHash: "0123456789abcdef",
@@ -917,19 +988,23 @@ test("fork plan inheritance is skipped when compress permission is deny", async 
     // Same fixtures, permission allow: the plan is inherited.
     const allowClient = transformClient(100_000)
     const allowRuntime = createRuntimeState(allowClient, new Logger(false))
-    await transformHandler(allowClient, allowRuntime, buildConfig("allow"), directory)(
-        {},
-        { messages: allowFixture.messages },
-    )
+    await transformHandler(
+        allowClient,
+        allowRuntime,
+        buildConfig("allow"),
+        directory,
+    )({}, { messages: allowFixture.messages })
     assert.ok(allowRuntime.get(allowSession).boundary.activePlan)
 
     // Same fixtures, permission deny: inheritance must not even happen.
     const denyClient = transformClient(100_000)
     const denyRuntime = createRuntimeState(denyClient, new Logger(false))
-    await transformHandler(denyClient, denyRuntime, buildConfig("deny"), directory)(
-        {},
-        { messages: denyFixture.messages },
-    )
+    await transformHandler(
+        denyClient,
+        denyRuntime,
+        buildConfig("deny"),
+        directory,
+    )({}, { messages: denyFixture.messages })
     assert.equal(denyRuntime.get(denySession).boundary.activePlan, null)
 })
 
@@ -940,9 +1015,13 @@ test("a waiting transform is not rejected when the active compaction fails", asy
     const client = transformClient(10_000, toasts)
     const runtime = createRuntimeState(client, new Logger(false))
     let rejectWinner!: (error: Error) => void
-    runtime.startCompaction(sessionId, () => new Promise((_, reject) => {
-        rejectWinner = reject
-    }))
+    runtime.startCompaction(
+        sessionId,
+        () =>
+            new Promise((_, reject) => {
+                rejectWinner = reject
+            }),
+    )
     const before = JSON.stringify(messages)
     const handler = transformHandler(
         client,
@@ -975,13 +1054,10 @@ test("the transform preserves reasoning signatures even when the model differs",
     const config = buildConfig("deny")
     const client = { session: { get: async () => ({}) }, provider: { list: async () => [] } }
     const runtime = createRuntimeState(client as any, logger)
-    const handler = createChatMessageTransformHandler(
-        client as any,
-        runtime,
-        logger,
-        config,
-        { global: undefined, agents: {} },
-    )
+    const handler = createChatMessageTransformHandler(client as any, runtime, logger, config, {
+        global: undefined,
+        agents: {},
+    })
     const signature = "ErUBCkYIBRgCKkA0signature"
     const assistant: WithParts = {
         info: {
