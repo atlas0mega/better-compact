@@ -1,7 +1,7 @@
 import { resolveCompactionProfile, type CompactionConfig } from "@better-compact/core"
 import type { RuntimeState, SessionState, WithParts } from "./state"
 import type { Logger } from "./logger"
-import type { PluginConfig } from "./config"
+import { resolveModelConfig, type PluginConfig } from "./config"
 import { stripHallucinations, stripHallucinationsFromString } from "./messages"
 import { filterMessages, filterMessagesInPlace } from "./messages/shape"
 import { handleContextCommand, handleHelpCommand, handleStatsCommand } from "./commands"
@@ -43,7 +43,11 @@ export function createSystemPromptHandler(
     ) => {
         if (input.model?.limit?.context) {
             if (input.model.providerID && input.model.id) {
-                runtime.setModelLimit(input.model.providerID, input.model.id, input.model.limit.context)
+                runtime.setModelLimit(
+                    input.model.providerID,
+                    input.model.id,
+                    input.model.limit.context,
+                )
             }
             if (input.sessionID) {
                 runtime.get(input.sessionID).modelContextLimit = input.model.limit.context
@@ -65,7 +69,7 @@ export function createChatMessageTransformHandler(
     // The incoming array is narrowed to WithParts by filterMessagesInPlace,
     // the single trust boundary between the host SDK's message types and ours.
     return async (_input: {}, output: { messages: unknown[] }) => {
-        const currentConfig = loadConfig()
+        let currentConfig = loadConfig()
         if (!currentConfig.enabled) return
         const receivedMessages = Array.isArray(output.messages) ? output.messages.length : 0
         const messages = filterMessagesInPlace(output.messages)
@@ -76,13 +80,19 @@ export function createChatMessageTransformHandler(
             })
         }
 
-        const sessionId = messages.find((message) => typeof message.info?.sessionID === "string")?.info.sessionID
+        const sessionId = messages.find((message) => typeof message.info?.sessionID === "string")
+            ?.info.sessionID
         if (!sessionId || runtime.isScratch(sessionId)) {
             return
         }
 
         const state = await runtime.prepare(sessionId, messages)
         const currentParams = getCurrentParams(state, messages, logger)
+        currentConfig = resolveModelConfig(
+            currentConfig,
+            currentParams.providerId,
+            currentParams.modelId,
+        )
         if (currentParams.providerId && currentParams.modelId) {
             state.modelContextLimit = await runtime.resolveModelLimit(
                 currentParams.providerId,
@@ -100,7 +110,12 @@ export function createChatMessageTransformHandler(
 
         const effectivePermission = compressPermission(state, currentConfig)
         if (effectivePermission !== "deny" && !state.boundary.activePlan && messages.length >= 3) {
-            const inherited = await findMatchingBoundaryPlan(sessionId, messages, workingDirectory, logger)
+            const inherited = await findMatchingBoundaryPlan(
+                sessionId,
+                messages,
+                workingDirectory,
+                logger,
+            )
             if (inherited) {
                 state.boundary.activePlan = inherited
                 await saveSessionState(state, logger).catch((error) => {
@@ -111,7 +126,8 @@ export function createChatMessageTransformHandler(
             }
         }
 
-        const automaticAllowed = currentConfig.compaction.automatic && effectivePermission === "allow"
+        const automaticAllowed =
+            currentConfig.compaction.automatic && effectivePermission === "allow"
         if (automaticAllowed) {
             await runAutomaticTransform({
                 client,
@@ -186,7 +202,9 @@ async function runAutomaticTransform(input: {
         if (planned) await showAutomaticCompactionToast(input.client, planned)
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        input.logger.error("Automatic Better Compact failed; request continues unpruned", { error: message })
+        input.logger.error("Automatic Better Compact failed; request continues unpruned", {
+            error: message,
+        })
         try {
             await input.client.tui.showToast({
                 body: {
@@ -248,7 +266,10 @@ export function createCommandExecuteHandler(
             }
 
             const args = (input.arguments || "").trim().split(/\s+/).filter(Boolean)
-            const subcommand = input.command === "better-compact-settings" ? "settings" : args[0]?.toLowerCase() || "compress"
+            const subcommand =
+                input.command === "better-compact-settings"
+                    ? "settings"
+                    : args[0]?.toLowerCase() || "compress"
 
             const commandCtx = {
                 client,
@@ -340,7 +361,12 @@ export function createChatMessageHandler(
     loadConfig: () => PluginConfig = () => config,
 ) {
     return async (
-        input: { sessionID: string; agent?: string; model?: { providerID?: string; modelID?: string }; variant?: string },
+        input: {
+            sessionID: string
+            agent?: string
+            model?: { providerID?: string; modelID?: string }
+            variant?: string
+        },
         output: { message: any; parts: any[] },
     ) => {
         const sentinel = output.parts.find(
@@ -408,7 +434,8 @@ export function createChatMessageHandler(
                         agent: input.agent ?? output.message?.agent,
                         variant: input.variant ?? output.message?.variant,
                     },
-                    compaction: sentinel.metadata?.compaction as Partial<CompactionConfig> | undefined,
+                    compaction: sentinel.metadata?.compaction as
+                        Partial<CompactionConfig> | undefined,
                     contextLimit,
                     currentTokens,
                     jobId,
@@ -459,11 +486,18 @@ async function runBetterCompact(input: {
     summaryVariant?: string
 }): Promise<void> {
     const params = input.params ?? getCurrentParams(input.state, input.messages, input.logger)
-    const profile = resolveCompactionProfile(input.config, input.compaction)
+    const effectiveConfig = resolveModelConfig(input.config, params.providerId, params.modelId)
+    const profile = resolveCompactionProfile(effectiveConfig, input.compaction)
     const summariesAllowed =
-        (input.compaction?.summaryEffort ?? input.config.compaction.summaryEffort) !== "off"
-    const contextLimit = input.contextLimit && input.contextLimit > 0 ? input.contextLimit : (input.state.modelContextLimit ?? 200_000)
-    const reportedCurrentTokens = input.currentTokens && input.currentTokens > 0 ? input.currentTokens : getCurrentTokenUsage(input.state, input.messages)
+        (input.compaction?.summaryEffort ?? effectiveConfig.compaction.summaryEffort) !== "off"
+    const contextLimit =
+        input.contextLimit && input.contextLimit > 0
+            ? input.contextLimit
+            : (input.state.modelContextLimit ?? 200_000)
+    const reportedCurrentTokens =
+        input.currentTokens && input.currentTokens > 0
+            ? input.currentTokens
+            : getCurrentTokenUsage(input.state, input.messages)
     startBoundaryJob(input.state, {
         id: input.jobId,
         sessionId: input.sessionId,
@@ -471,7 +505,9 @@ async function runBetterCompact(input: {
         counters: {
             beforeTokens: reportedCurrentTokens,
             currentTokens: reportedCurrentTokens,
-            targetTokens: Math.round((contextLimit * profile.targetPercent) / 100),
+            targetTokens:
+                effectiveConfig.compaction.targetTokens ??
+                Math.round((contextLimit * profile.targetPercent) / 100),
             contextLimit,
             stageClearedTokens: 0,
             clearedTokens: 0,
@@ -494,17 +530,32 @@ async function runBetterCompact(input: {
     try {
         setBoundaryStage(input.state, "load", "running", "Reading current OpenCode session history")
         updateBoundaryCounters(input.state, { messages: input.messages.length })
-        appendBoundaryLog(input.state, `Loaded ${input.messages.length} messages from current session.`)
-        setBoundaryStage(input.state, "load", "completed", `${input.messages.length} messages loaded`)
+        appendBoundaryLog(
+            input.state,
+            `Loaded ${input.messages.length} messages from current session.`,
+        )
+        setBoundaryStage(
+            input.state,
+            "load",
+            "completed",
+            `${input.messages.length} messages loaded`,
+        )
         await saveProgress()
 
-        setBoundaryStage(input.state, "scan", "running", "Estimating context and selecting pruning stages")
+        setBoundaryStage(
+            input.state,
+            "scan",
+            "running",
+            "Estimating context and selecting pruning stages",
+        )
         await saveProgress()
         const plan = buildBoundaryContextPlan(input.messages, {
             contextLimit,
             force: true,
             triggerRatio: profile.triggerPercent / 100,
             targetRatio: profile.targetPercent / 100,
+            triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
+            targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
             recentToolResultBudgetTokens: profile.recentToolTokens,
             providerReportedTokens: reportedCurrentTokens,
             summariesAllowed,
@@ -534,15 +585,28 @@ async function runBetterCompact(input: {
             stageClearedTokens: 0,
             clearedTokens: Math.max(0, plan.beforeTokens - plan.afterPruneTokens),
         })
-        setBoundaryStage(input.state, "scan", "completed", `Projected ${formatCompactTokens(plan.beforeTokens)} -> ${formatCompactTokens(plan.afterPruneTokens)}`)
-        appendBoundaryLog(input.state, `Projected context reduction: ${formatCompactTokens(plan.beforeTokens)} -> ${formatCompactTokens(plan.afterPruneTokens)}.`)
+        setBoundaryStage(
+            input.state,
+            "scan",
+            "completed",
+            `Projected ${formatCompactTokens(plan.beforeTokens)} -> ${formatCompactTokens(plan.afterPruneTokens)}`,
+        )
+        appendBoundaryLog(
+            input.state,
+            `Projected context reduction: ${formatCompactTokens(plan.beforeTokens)} -> ${formatCompactTokens(plan.afterPruneTokens)}.`,
+        )
         await saveProgress()
 
         setBoundaryStage(input.state, "transcript", "running", "Writing raw transcript reference")
         await saveProgress()
         await writeBoundaryTranscript(input.workingDirectory, plan, input.logger)
         updateBoundaryCounters(input.state, { archivedMessages: plan.transcript.messageIds.length })
-        setBoundaryStage(input.state, "transcript", "completed", `${plan.transcript.messageIds.length} messages archived`)
+        setBoundaryStage(
+            input.state,
+            "transcript",
+            "completed",
+            `${plan.transcript.messageIds.length} messages archived`,
+        )
         appendBoundaryLog(input.state, `Transcript written: ${plan.transcript.relativePath}`)
         await saveProgress()
 
@@ -577,11 +641,23 @@ async function runBetterCompact(input: {
                 stageClearedTokens: stage.clearedTokens,
                 clearedTokens: Math.max(0, plan.beforeTokens - stage.afterTokens),
             })
-            appendBoundaryLog(input.state, `${stage.label}: ${formatCompactTokens(stage.clearedTokens)} cleared.`)
+            appendBoundaryLog(
+                input.state,
+                `${stage.label}: ${formatCompactTokens(stage.clearedTokens)} cleared.`,
+            )
             await saveProgress()
         }
 
-        for (const skippedStage of ["skills", "supersede-reads", "purge-error-inputs", "tools-old", "reasoning", "tools-remaining", "assistant-runs", "prefix-summary"]) {
+        for (const skippedStage of [
+            "skills",
+            "supersede-reads",
+            "purge-error-inputs",
+            "tools-old",
+            "reasoning",
+            "tools-remaining",
+            "assistant-runs",
+            "prefix-summary",
+        ]) {
             if (appliedStageIds.has(skippedStage)) continue
             setBoundaryStage(input.state, skippedStage, "skipped", "Not needed")
         }
@@ -607,7 +683,10 @@ async function runBetterCompact(input: {
                 summaryJobsFailed: 0,
                 stageClearedTokens: 0,
             })
-            appendBoundaryLog(input.state, `Running ${plan.summaryJobs.length} summary jobs in parallel.`)
+            appendBoundaryLog(
+                input.state,
+                `Running ${plan.summaryJobs.length} summary jobs in parallel.`,
+            )
             await saveProgress()
             const assistantSummaries = await summarizeBoundaryJobs({
                 client: input.client,
@@ -644,6 +723,8 @@ async function runBetterCompact(input: {
                         assistantSummaries,
                         triggerRatio: profile.triggerPercent / 100,
                         targetRatio: profile.targetPercent / 100,
+                        triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
+                        targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
                         recentToolResultBudgetTokens: profile.recentToolTokens,
                         providerReportedTokens: reportedCurrentTokens,
                         summariesAllowed,
@@ -661,7 +742,9 @@ async function runBetterCompact(input: {
                 stageClearedTokens: Math.max(0, plan.beforeTokens - finalPlan.afterPruneTokens),
                 clearedTokens: Math.max(0, finalPlan.beforeTokens - finalPlan.afterPruneTokens),
             })
-            const finalPrefixStage = finalPlan.stages.find((stage) => stage.name === "prefix-summary")
+            const finalPrefixStage = finalPlan.stages.find(
+                (stage) => stage.name === "prefix-summary",
+            )
             if (finalPrefixStage) {
                 setBoundaryStage(
                     input.state,
@@ -720,7 +803,13 @@ async function runBetterCompact(input: {
         appendBoundaryLog(input.state, `Failed: ${message}`)
         failBoundaryJob(input.state, message)
         await saveSessionState(input.state, input.logger).catch(() => {})
-        await sendIgnoredMessage(input.client, input.sessionId, `Better Compact failed: ${message}`, params, input.logger)
+        await sendIgnoredMessage(
+            input.client,
+            input.sessionId,
+            `Better Compact failed: ${message}`,
+            params,
+            input.logger,
+        )
         throw error
     }
 }
@@ -734,7 +823,10 @@ function validBoundaryJobStartedAt(value: unknown): number | undefined {
 }
 
 function validBoundaryCounter(value: unknown): number | undefined {
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER
+    return typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= Number.MAX_SAFE_INTEGER
         ? value
         : undefined
 }

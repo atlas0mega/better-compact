@@ -46,6 +46,9 @@ export interface BoundaryContextOptions {
     contextLimit?: number
     triggerRatio?: number
     targetRatio?: number
+    /** Exact token budgets override ratios when supplied by a host. */
+    triggerTokens?: number
+    targetTokens?: number
     minTailMessages?: number
     minTailUserTurns?: number
     recentToolResultBudgetTokens?: number

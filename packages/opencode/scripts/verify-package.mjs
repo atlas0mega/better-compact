@@ -13,11 +13,7 @@ const builtinNames = new Set([
     ...builtinModules.map((name) => name.replace(/^node:/, "")),
 ])
 
-const allowedNamedImportPackages = new Set([
-    "@opentui/core",
-    "@opentui/solid",
-    "solid-js",
-])
+const allowedNamedImportPackages = new Set(["@opentui/core", "@opentui/solid", "solid-js"])
 
 const requiredRepoFiles = [
     "dist/index.js",
@@ -308,7 +304,9 @@ function validatePackedFiles() {
         encoding: "utf8",
     })
 
-    const [result] = JSON.parse(output)
+    const metadata = JSON.parse(output)
+    // npm versions emit either an array or an object keyed by package name.
+    const [result] = Array.isArray(metadata) ? metadata : Object.values(metadata)
     if (!result || !Array.isArray(result.files)) {
         fail("npm pack --dry-run --json did not return file metadata")
     }

@@ -82,13 +82,13 @@ export function buildPlan(
         providerReportedTokens > 0 ? Math.max(0, providerReportedTokens - rawEstimateTokens) : 0
     const estimator: Estimator = { overheadTokens }
     const beforeTokens = providerReportedTokens > 0 ? providerReportedTokens : rawEstimateTokens
-    const triggerTokens = Math.floor(contextLimit * triggerRatio)
+    const triggerTokens = inputs.triggerTokens ?? Math.floor(contextLimit * triggerRatio)
     // Either scale crossing the trigger means the request is in danger: the
     // provider total sees overhead the estimate cannot, and the estimate sees
     // fresh turns the provider has not priced yet.
     if (!inputs.force && Math.max(beforeTokens, rawEstimateTokens) < triggerTokens) return null
 
-    const targetTokens = Math.floor(contextLimit * targetRatio)
+    const targetTokens = inputs.targetTokens ?? Math.floor(contextLimit * targetRatio)
     // A token budget replaces the count-based tail outright: its ceiling is
     // the cap that keeps a long tool loop from staying raw in full. The raw
     // tail can never exceed the target, or the target is unreachable by
@@ -431,6 +431,8 @@ export interface Engine {
         contextLimit?: number
         triggerRatio?: number
         targetRatio?: number
+        triggerTokens?: number
+        targetTokens?: number
         recentToolResultBudgetTokens?: number
         providerReportedTokens?: number
         tailBudgetTokens?: { floor: number; ceiling: number }
@@ -455,6 +457,8 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             contextLimit,
             triggerRatio,
             targetRatio,
+            triggerTokens,
+            targetTokens,
             recentToolResultBudgetTokens,
             providerReportedTokens,
             tailBudgetTokens,
@@ -468,7 +472,16 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             let priorPlan: PlanSnapshot | undefined
             const cached = await ports.plans.load(sessionKey)
             if (cached && cached.sessionId === sessionKey) {
-                const replayed = force ? null : replayPlanSnapshot(turns, cached, spec)
+                const budgetsMatch =
+                    cached.contextLimit === contextLimit &&
+                    cached.triggerTokens ===
+                        (triggerTokens ??
+                            Math.floor((contextLimit ?? 0) * (triggerRatio ?? TRIGGER_RATIO))) &&
+                    cached.targetTokens ===
+                        (targetTokens ??
+                            Math.floor((contextLimit ?? 0) * (targetRatio ?? TARGET_RATIO)))
+                const replayed =
+                    force || !budgetsMatch ? null : replayPlanSnapshot(turns, cached, spec)
                 if (replayed) return { outcome: "replayed", turns: replayed }
                 staleSnapshotCleared = true
                 priorPlan = cached
@@ -478,6 +491,8 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                 contextLimit,
                 triggerRatio,
                 targetRatio,
+                triggerTokens,
+                targetTokens,
                 recentToolResultBudgetTokens,
                 providerReportedTokens,
                 tailBudgetTokens,

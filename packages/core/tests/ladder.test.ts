@@ -1216,6 +1216,39 @@ test("engine prunes on provider-reported usage the raw estimate alone misses", a
     assert.equal(withUsage.outcome, "planned")
 })
 
+test("engine does not replay thresholds cached for another model", async () => {
+    const turns = buildMultiRunConversation()
+    const original = buildPlan(
+        turns,
+        inputs({ contextLimit: 40_000, recentToolResultBudgetTokens: 0 }),
+        spec,
+    )
+    assert.ok(original)
+    const snapshot = toPlanSnapshot(original)
+    let saved: PlanSnapshot | null | undefined
+    const engine = createEngine(spec, {
+        transcripts: {
+            citablePath: (key, hash) => `transcripts/${key}/${hash}.md`,
+            write: async () => ({}),
+        },
+        plans: {
+            load: () => snapshot,
+            save: (_key, value) => {
+                saved = value
+            },
+        },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    })
+    const result = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        triggerTokens: codec.estimateTurns(turns) + 100_000,
+    })
+    assert.equal(result.outcome, "unchanged")
+    assert.equal(saved, null)
+})
+
 test("engine keeps the deterministic plan when summary scheduling rejects", async () => {
     const turns = buildMultiRunConversation()
     const planInputs = inputs({ contextLimit: 40_000, recentToolResultBudgetTokens: 0 })
