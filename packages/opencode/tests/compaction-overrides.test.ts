@@ -48,6 +48,16 @@ test("unspecified fields inherit model -> provider -> global independently", () 
     assert.deepEqual(base, before)
 })
 
+test("reasoning effort inherits independently at every scope", () => {
+    const base = config()
+    base.compaction.summaryEffort = "medium"
+    base.compaction.providers!.runpod!.summaryEffort = "high"
+    base.compaction.providers!.runpod!.models!["qwen/3.8"]!.summaryEffort = "low"
+    assert.equal(resolveModelConfig(base, "runpod", "qwen/3.8").compaction.summaryEffort, "low")
+    assert.equal(resolveModelConfig(base, "runpod", "other").compaction.summaryEffort, "high")
+    assert.equal(resolveModelConfig(base, "other", "other").compaction.summaryEffort, "medium")
+})
+
 test("unknown model inherits provider; unknown provider and missing identity inherit global", () => {
     const base = config()
     assert.equal(resolveModelConfig(base, "runpod", "other").compaction.triggerTokens, 200000)

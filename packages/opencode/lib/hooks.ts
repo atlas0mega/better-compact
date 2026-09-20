@@ -185,6 +185,7 @@ async function runAutomaticTransform(input: {
                         parentSessionId: input.sessionId,
                         jobs,
                         params: input.params,
+                        summaryEffort: input.config.compaction.summaryEffort,
                         concurrency: resolveCompactionProfile(input.config).summarizerConcurrency,
                     }),
             })
@@ -689,6 +690,9 @@ async function runBetterCompact(input: {
             )
             await saveProgress()
             const assistantSummaries = await summarizeBoundaryJobs({
+                summaryEffort: input.summaryVariant
+                    ? "inherit"
+                    : (input.compaction?.summaryEffort ?? effectiveConfig.compaction.summaryEffort),
                 client: input.client,
                 runtime: input.runtime,
                 logger: input.logger,
