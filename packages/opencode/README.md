@@ -1,5 +1,20 @@
 # Better Compact for OpenCode
 
+## Compaction reasoning per provider/model
+
+Set `summaryEffort` inside `compaction`, a `compaction.providers.<provider>` entry,
+or that provider's `models.<model>` entry. Missing values inherit model →
+provider → global, independently of thresholds and other settings.
+
+For example, set a provider's `summaryEffort` to `"high"` and one model's to
+`"low"` to use cheaper reasoning only for that model's compaction summaries.
+Accepted values are `inherit`, `low`, `medium`, `high`, `max`, and `off`.
+`inherit` keeps the active conversation variant; `off` disables LLM summaries
+(it does not mean reasoning-disabled summaries). `max` selects `max`, or `xhigh`
+when that is what the model advertises. Unsupported variants retain the active
+variant. This applies to automatic and manual summaries; an explicit manual
+reasoning selection takes precedence. Main-conversation reasoning is unchanged.
+
 ## Provider/model compaction overrides (fork)
 
 In `better-compact.jsonc`, settings inherit **field by field**: model override,

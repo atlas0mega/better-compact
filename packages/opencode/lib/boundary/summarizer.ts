@@ -2,6 +2,7 @@ import {
     type BoundarySummaryJob,
     type SummarizeProgressEvent,
     type Summarizer,
+    type SummaryEffort,
 } from "@better-compact/core"
 import type { Logger } from "../logger"
 import type { RuntimeState } from "../state"
@@ -19,18 +20,41 @@ interface SummarizeBoundaryJobsInput {
         variant: string | undefined
     }
     concurrency?: number
+    summaryEffort?: SummaryEffort
     onProgress?: (event: SummarizeProgressEvent) => Promise<void> | void
 }
 
 export async function summarizeBoundaryJobs(input: SummarizeBoundaryJobsInput): Promise<Record<string, string>> {
+    if (input.summaryEffort === "off") return {}
     if (input.jobs.length === 0 || !canRunScratchSession(input.client)) return {}
+    const variant = await resolveCompactionVariant(input.client, input.params, input.summaryEffort)
     return input.runtime.summaryScheduler.summarize({
         sessionKey: input.parentSessionId,
         jobs: input.jobs,
-        summarizer: createScratchSummarizer(input),
+        summarizer: createScratchSummarizer({ ...input, params: { ...input.params, variant } }),
         concurrency: input.concurrency,
         onProgress: input.onProgress,
     })
+}
+
+/** Resolve only advertised variants; unsupported efforts retain the active variant. */
+export async function resolveCompactionVariant(
+    client: any,
+    params: SummarizeBoundaryJobsInput["params"],
+    effort?: SummaryEffort,
+): Promise<string | undefined> {
+    if (!effort || effort === "inherit" || effort === "off") return params.variant
+    try {
+        const response = await client.provider.list()
+        const payload = response?.data ?? response
+        const providers = Array.isArray(payload) ? payload : payload?.all ?? payload?.providers ?? []
+        const provider = providers.find((item: any) => item?.id === params.providerId)
+        const variants = provider?.models?.[params.modelId ?? ""]?.variants ?? {}
+        const candidates = effort === "max" ? ["max", "xhigh"] : [effort]
+        return candidates.find((candidate) => Object.hasOwn(variants, candidate)) ?? params.variant
+    } catch {
+        return params.variant
+    }
 }
 
 function canRunScratchSession(client: any): boolean {
