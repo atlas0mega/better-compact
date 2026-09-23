@@ -4,6 +4,7 @@ import {
     type Summarizer,
     type SummaryEffort,
 } from "@better-compact/core"
+import type { SessionCreateData } from "@opencode-ai/sdk/v2"
 import type { Logger } from "../logger"
 import type { RuntimeState } from "../state"
 
@@ -24,7 +25,9 @@ interface SummarizeBoundaryJobsInput {
     onProgress?: (event: SummarizeProgressEvent) => Promise<void> | void
 }
 
-export async function summarizeBoundaryJobs(input: SummarizeBoundaryJobsInput): Promise<Record<string, string>> {
+export async function summarizeBoundaryJobs(
+    input: SummarizeBoundaryJobsInput,
+): Promise<Record<string, string>> {
     if (input.summaryEffort === "off") return {}
     if (input.jobs.length === 0 || !canRunScratchSession(input.client)) return {}
     const variant = await resolveCompactionVariant(input.client, input.params, input.summaryEffort)
@@ -47,7 +50,9 @@ export async function resolveCompactionVariant(
     try {
         const response = await client.provider.list()
         const payload = response?.data ?? response
-        const providers = Array.isArray(payload) ? payload : payload?.all ?? payload?.providers ?? []
+        const providers = Array.isArray(payload)
+            ? payload
+            : (payload?.all ?? payload?.providers ?? [])
         const provider = providers.find((item: any) => item?.id === params.providerId)
         const variants = provider?.models?.[params.modelId ?? ""]?.variants ?? {}
         const candidates = effort === "max" ? ["max", "xhigh"] : [effort]
@@ -72,25 +77,30 @@ function createScratchSummarizer(input: SummarizeBoundaryJobsInput): Summarizer 
             let scratchSessionId: string | undefined
             let untrackScratch: (() => void) | undefined
             try {
-                const created = await input.client.session.create({
-                    body: {
-                        parentID: input.parentSessionId,
-                        title: `Better Compact summary ${job.rangeStartMessageId}`,
-                        agent: input.params.agent,
-                        model:
-                            input.params.providerId && input.params.modelId
-                                ? { providerID: input.params.providerId, modelID: input.params.modelId }
-                                : undefined,
-                        metadata: {
-                            betterCompactScratch: true,
-                            parentSessionId: input.parentSessionId,
-                            rangeStartMessageId: job.rangeStartMessageId,
-                            rangeEndMessageId: job.rangeEndMessageId,
-                        },
+                // Session creation uses model.id; prompting below uses model.modelID.
+                const body = {
+                    parentID: input.parentSessionId,
+                    title: `Better Compact summary ${job.rangeStartMessageId}`,
+                    agent: input.params.agent,
+                    model:
+                        input.params.providerId && input.params.modelId
+                            ? { providerID: input.params.providerId, id: input.params.modelId }
+                            : undefined,
+                    metadata: {
+                        betterCompactScratch: true,
+                        parentSessionId: input.parentSessionId,
+                        rangeStartMessageId: job.rangeStartMessageId,
+                        rangeEndMessageId: job.rangeEndMessageId,
                     },
+                } satisfies NonNullable<SessionCreateData["body"]>
+                const created = await input.client.session.create({
+                    body,
                 })
+                if (created?.error)
+                    throw scratchResponseError("Scratch session creation", created.error)
                 scratchSessionId = created?.data?.id ?? created?.id
-                if (!scratchSessionId) return null
+                if (!scratchSessionId)
+                    throw new Error("Scratch session creation returned no session ID")
                 untrackScratch = input.runtime.trackScratch(scratchSessionId)
 
                 const response = await input.client.session.prompt({
@@ -99,12 +109,17 @@ function createScratchSummarizer(input: SummarizeBoundaryJobsInput): Summarizer 
                         agent: input.params.agent,
                         model:
                             input.params.providerId && input.params.modelId
-                                ? { providerID: input.params.providerId, modelID: input.params.modelId }
+                                ? {
+                                      providerID: input.params.providerId,
+                                      modelID: input.params.modelId,
+                                  }
                                 : undefined,
                         variant: input.params.variant,
                         parts: [{ type: "text", text: job.prompt }],
                     },
                 })
+                if (response?.error)
+                    throw scratchResponseError("Scratch session prompt", response.error)
                 return extractAssistantText(response?.data ?? response)
             } catch (error) {
                 input.logger.warn("Better Compact scratch summarization failed", {
@@ -129,6 +144,13 @@ function createScratchSummarizer(input: SummarizeBoundaryJobsInput): Summarizer 
             }
         },
     }
+}
+
+function scratchResponseError(operation: string, error: any): Error {
+    const message = error instanceof Error ? error.message : error?.message
+    return new Error(
+        `${operation} failed: ${typeof message === "string" ? message : "server returned an error"}`,
+    )
 }
 
 function extractAssistantText(message: any): string {
