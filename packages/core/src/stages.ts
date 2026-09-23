@@ -216,9 +216,26 @@ export function turnText(turn: Turn): string {
         .join("\n\n")
 }
 
-export function formatPrefixSummary(turns: Turn[]): string {
+export function formatPrefixSummary(
+    turns: Turn[],
+    conventions?: Conventions,
+    rawTail: Turn[] = [],
+): string {
     // User instructions are the contract the session answers to: they carry
-    // through the summary byte-for-byte, never rewrapped or truncated.
+    // through the summary byte-for-byte, never rewrapped or truncated. The
+    // platform can identify generated prompts that supersede earlier ones;
+    // only their latest copy needs to survive in the live context.
+    const seen = new Set(
+        rawTail
+            .filter((turn) => turn.role === "user" && !turn.ephemeral)
+            .flatMap((turn) => turn.items)
+            .filter(
+                (item): item is Extract<Item, { kind: "text" | "synthetic" }> =>
+                    item.kind === "text" || item.kind === "synthetic",
+            )
+            .map((item) => conventions?.repeatableUserTextKey?.(item.text))
+            .filter((key): key is string => key !== null && key !== undefined),
+    )
     const userMessages = turns
         .filter((turn) => turn.role === "user" && !turn.ephemeral)
         .flatMap((turn) =>
@@ -230,6 +247,15 @@ export function formatPrefixSummary(turns: Turn[]): string {
                 .map((item) => item.text),
         )
         .filter((text) => text.trim().length > 0)
+        .reverse()
+        .filter((text) => {
+            const key = conventions?.repeatableUserTextKey?.(text)
+            if (key === null || key === undefined) return true
+            if (seen.has(key)) return false
+            seen.add(key)
+            return true
+        })
+        .reverse()
     const assistantFacts = turns
         .filter((turn) => turn.role === "assistant")
         .map((turn) => turnText(turn).trim())
@@ -245,6 +271,35 @@ export function formatPrefixSummary(turns: Turn[]): string {
             (text) => `Resume from prior assistant progress: ${formatSummaryItem(text)}`,
         ),
     ])
+}
+
+// Older stored plans may already contain full copies of generated prompts.
+// Remove only exact historical prompts that were included by the deterministic
+// fallback; a hand-written or model-generated summary remains untouched.
+export function dedupeRepeatableUserTextInSummary(
+    summary: string,
+    turns: Turn[],
+    conventions: Conventions,
+): string {
+    if (!conventions.repeatableUserTextKey) return summary
+    const seen = new Set<string>()
+    let result = summary
+    const texts = turns
+        .filter((turn) => turn.role === "user" && !turn.ephemeral)
+        .flatMap((turn) => turn.items)
+        .filter(
+            (item): item is Extract<Item, { kind: "text" | "synthetic" }> =>
+                item.kind === "text" || item.kind === "synthetic",
+        )
+        .map((item) => item.text)
+    for (let index = texts.length - 1; index >= 0; index--) {
+        const text = texts[index]
+        const key = conventions.repeatableUserTextKey(text)
+        if (key === null) continue
+        if (seen.has(key)) result = result.replace(`- ${text}\n`, "")
+        else seen.add(key)
+    }
+    return result
 }
 
 function formatSummaryItem(text: string): string {

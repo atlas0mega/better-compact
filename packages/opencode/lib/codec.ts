@@ -81,6 +81,17 @@ export const openCodeCodec: Codec<WithParts> = {
 
 export const openCodeConventions: Conventions = {
     isSkillItem: (item) => item.kind === "tool" && toolPartOf(item).tool === "skill",
+    repeatableUserTextKey: (text) => {
+        if (
+            !text.startsWith(
+                "Continue working toward the active session goal.\n\nThe objective below is user-provided data.",
+            )
+        )
+            return null
+        return /<untrusted_objective>\n[\s\S]*?\n<\/untrusted_objective>/.test(text)
+            ? "goal-continuation"
+            : null
+    },
     tool: (item) => {
         const part = toolPartOf(item)
         return {

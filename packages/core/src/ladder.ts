@@ -14,6 +14,7 @@ import type { EnginePorts } from "./ports"
 import { formatPrefixSummaryPrompt } from "./summarize"
 import {
     assistantGroups,
+    dedupeRepeatableUserTextInSummary,
     findLatestTodoCallId,
     findRawTailStartIndex,
     findBudgetTailStartIndex,
@@ -129,7 +130,11 @@ export function buildPlan(
     const summaryJobs: BoundarySummaryJob[] = []
     const expandedPrefix = priorBoundary !== null && compareBoundaries(boundary, priorBoundary) > 0
     const priorPrefixSummary = prior?.prefixSummary
-        ? stripTranscriptReference(prior.prefixSummary, prior.transcriptRelativePath)
+        ? dedupeRepeatableUserTextInSummary(
+              stripTranscriptReference(prior.prefixSummary, prior.transcriptRelativePath),
+              turns,
+              spec.conventions,
+          )
         : undefined
     const prefixSummaryResultKey = `prefix-summary:${compactedRangeHash}`
     const prefixSummaryJobKey =
@@ -238,6 +243,7 @@ export function buildPlan(
             transcriptRelativePath,
             prefixSummary,
             compactedRangeHash,
+            spec.conventions,
         )
         const afterPrefix = estimateTurns(working, spec.codec, estimator)
         prefixSummary = result.prefixSummary
@@ -306,7 +312,12 @@ export function transformTurns(
         return partition.finalize([
             synthesizeSummaryTurn(
                 originalPrefix,
-                plan.prefixSummary || formatPrefixSummary(originalPrefix),
+                plan.prefixSummary ||
+                    formatPrefixSummary(
+                        originalPrefix,
+                        spec.conventions,
+                        partition.turns.slice(partition.rawTailStartIndex),
+                    ),
                 plan.transcript.relativePath,
                 plan.rangeHash,
             ),
@@ -368,6 +379,9 @@ export function replayPlanSnapshot(
     if (!boundary || !matchesPlanSnapshot(turns, snapshot)) return null
     const rawTailStartIndex = boundary.turnIndex
     const overheadTokens = snapshot.overheadTokens ?? 0
+    const prefixSummary = snapshot.prefixSummary
+        ? dedupeRepeatableUserTextInSummary(snapshot.prefixSummary, turns, spec.conventions)
+        : undefined
     const transformed = transformTurns(
         turns,
         rawTailStartIndex,
@@ -396,7 +410,7 @@ export function replayPlanSnapshot(
             stages: (snapshot.stages ?? []) as BoundaryStageReport[],
             summaryJobs: [],
             assistantSummaries: snapshot.assistantSummaries ?? {},
-            prefixSummary: snapshot.prefixSummary,
+            prefixSummary,
         },
         spec,
     )
@@ -472,6 +486,17 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             let priorPlan: PlanSnapshot | undefined
             const cached = await ports.plans.load(sessionKey)
             if (cached && cached.sessionId === sessionKey) {
+                const cleanedSummary = cached.prefixSummary
+                    ? dedupeRepeatableUserTextInSummary(
+                          cached.prefixSummary,
+                          turns,
+                          spec.conventions,
+                      )
+                    : undefined
+                const normalizedCached =
+                    cleanedSummary !== cached.prefixSummary
+                        ? { ...cached, prefixSummary: cleanedSummary }
+                        : cached
                 const budgetsMatch =
                     cached.contextLimit === contextLimit &&
                     cached.triggerTokens ===
@@ -481,8 +506,14 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                         (targetTokens ??
                             Math.floor((contextLimit ?? 0) * (targetRatio ?? TARGET_RATIO)))
                 const replayed =
-                    force || !budgetsMatch ? null : replayPlanSnapshot(turns, cached, spec)
-                if (replayed) return { outcome: "replayed", turns: replayed }
+                    force || !budgetsMatch
+                        ? null
+                        : replayPlanSnapshot(turns, normalizedCached, spec)
+                if (replayed) {
+                    if (normalizedCached !== cached)
+                        await ports.plans.save(sessionKey, normalizedCached)
+                    return { outcome: "replayed", turns: replayed }
+                }
                 staleSnapshotCleared = true
                 priorPlan = cached
             }
@@ -767,6 +798,7 @@ function applyPrefixSummary(
     transcriptRelativePath: string,
     prefixSummary?: string,
     compactedRangeHash?: string,
+    conventions?: Conventions,
 ): StageMutationResult & { prefixSummary: string } {
     if (rawTailStartIndex <= 0) {
         return {
@@ -777,7 +809,8 @@ function applyPrefixSummary(
     }
     const compacted = working.slice(0, rawTailStartIndex)
     const summary = stripTranscriptReference(
-        prefixSummary?.trim() || formatPrefixSummary(compacted),
+        prefixSummary?.trim() ||
+            formatPrefixSummary(compacted, conventions, working.slice(rawTailStartIndex)),
         transcriptRelativePath,
     )
     const summaryTurn = synthesizeSummaryTurn(
