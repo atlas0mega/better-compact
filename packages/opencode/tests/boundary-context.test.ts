@@ -455,6 +455,8 @@ test("an older deterministic prefix gets one bounded synthesis attempt below tri
         requiresCustomCompaction: true,
         prefixSummary: oldPrefix,
         afterPruneTokens: 5_000,
+        prefixChunkAttempted: true as const,
+        prefixChunkVersion: 1,
     }
     const state = createSessionState()
     state.sessionId = sessionID
@@ -479,6 +481,7 @@ test("an older deterministic prefix gets one bounded synthesis attempt below tri
     )
     assert.equal(calls, 1)
     assert.equal(state.boundary.activePlan?.prefixChunkAttempted, true)
+    assert.equal(state.boundary.activePlan?.prefixChunkVersion, 2)
     const replay = structuredClone(messages)
     assert.equal(
         await processBoundaryTransform({
@@ -497,6 +500,28 @@ test("an older deterministic prefix gets one bounded synthesis attempt below tri
     )
     assert.equal(calls, 1)
     assert.deepEqual(replay, first)
+    // The same oversized saved range may be retried if its summary model changes.
+    state.boundary.activePlan = {
+        ...oldSnapshot,
+        prefixChunkVersion: 2,
+        prefixChunkModel: "inherit",
+    }
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    const changedModel = structuredClone(messages)
+    await processBoundaryTransform({
+        state,
+        logger,
+        config,
+        directory,
+        messages: changedModel,
+        summariesAllowed: true,
+        summarizePrefix: async () => {
+            calls++
+            return null
+        },
+    })
+    assert.equal(calls, 2)
+    assert.equal(state.boundary.activePlan?.prefixChunkModel, "openai/gpt-6-luna")
 })
 
 test("prefix summary keeps only the latest goal continuation even when objectives change", async () => {

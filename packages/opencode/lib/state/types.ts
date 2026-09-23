@@ -61,6 +61,8 @@ export interface BoundaryPlanSnapshot extends PlanSnapshot {
     pluginInjectionPruning?: true
     // Prevent repeatedly paying for a chunk synthesis on an unchanged range.
     prefixChunkAttempted?: true
+    prefixChunkVersion?: number
+    prefixChunkModel?: string
 }
 
 export interface BoundaryState {

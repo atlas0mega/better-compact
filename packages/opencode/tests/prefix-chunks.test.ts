@@ -85,6 +85,8 @@ test("a long deterministic prefix is covered by five bounded chronological jobs"
         assert.ok(countTokens(chunk.job.prompt) + 80 <= 24_000)
         assert.match(chunk.job.prompt, /transcripts\/raw\.md/)
     }
+    const sizes = jobs.map((chunk) => countTokens(chunk.job.prompt))
+    assert.ok(Math.max(...sizes) - Math.min(...sizes) < 500, `unbalanced prompts: ${sizes}`)
     assert.match(jobs[0].job.prompt, /feature-0\.ts/)
     assert.match(jobs.at(-1)!.job.prompt, /feature-719\.ts/)
     const results = Object.fromEntries(jobs.map((job, index) => [job.job.key, checkpoint(index)]))
@@ -107,6 +109,39 @@ test("a long deterministic prefix is covered by five bounded chronological jobs"
 test("the chunk planner refuses oversized histories rather than omitting older turns", () => {
     const { plan } = history(1_400)
     assert.deepEqual(buildPrefixChunks(plan), [])
+    const largerModel = buildPrefixChunks(plan, 100_000)
+    assert.equal(largerModel.length, 5)
+    assert.equal(
+        largerModel.reduce((sum, chunk) => sum + chunk.count, 0),
+        1_400,
+    )
+    const sizes = largerModel.map((chunk) => countTokens(chunk.job.prompt))
+    assert.ok(Math.max(...sizes) - Math.min(...sizes) < 500, `unbalanced prompts: ${sizes}`)
+    assert.ok(sizes.every((size) => size + 80 <= 100_000))
+    assert.deepEqual(buildPrefixChunks(history(720).plan, 20_000), [])
+    const smallHistory = buildPrefixChunks(history(40).plan, 20_000)
+    assert.equal(smallHistory.length, 1)
+    assert.equal(smallHistory[0].count, 40)
+})
+
+test("different-sized progress entries balance by tokens while staying chronological", () => {
+    const { plan, turns } = history(720)
+    for (let index = 0; index < 720; index += 4) {
+        turns[index + 1].items = [
+            { kind: "synthetic", key: `text-${index}`, text: `Finished src/feature-${index}.ts.` },
+        ]
+    }
+    plan.prefixSummary = formatPrefixSummary(turns.slice(0, -1))
+    const chunks = buildPrefixChunks(plan)
+    assert.ok(chunks.length > 1 && chunks.length <= 5)
+    assert.equal(
+        chunks.reduce((sum, chunk) => sum + chunk.count, 0),
+        720,
+    )
+    const sizes = chunks.map((chunk) => countTokens(chunk.job.prompt))
+    assert.ok(Math.max(...sizes) - Math.min(...sizes) < 500, `unbalanced prompts: ${sizes}`)
+    assert.match(chunks[0].job.prompt, /feature-0\.ts/)
+    assert.match(chunks.at(-1)!.job.prompt, /feature-719\.ts/)
 })
 
 test("five independent Luna/high chunks complete concurrently and assemble in source order", async () => {
@@ -123,7 +158,10 @@ test("five independent Luna/high chunks complete concurrently and assemble in so
                         {
                             id: "openai",
                             models: {
-                                "gpt-6-luna": { variants: { high: {} } },
+                                "gpt-6-luna": {
+                                    variants: { high: {} },
+                                    limit: { context: 262_144 },
+                                },
                             },
                         },
                     ],
@@ -131,10 +169,15 @@ test("five independent Luna/high chunks complete concurrently and assemble in so
             }),
         },
         session: {
-            create: async () => ({ data: { id: `chunk-scratch-${++calls}` } }),
+            create: async ({ body }: any) => {
+                assert.equal(body.parentID, "parent")
+                assert.equal(body.agent, "tennis-mc-specialist")
+                return { data: { id: `chunk-scratch-${++calls}` } }
+            },
             prompt: async ({ body }: any) => {
                 assert.deepEqual(body.model, { providerID: "openai", modelID: "gpt-6-luna" })
                 assert.equal(body.variant, "high")
+                assert.equal(body.agent, "tennis-mc-specialist")
                 active++
                 peak = Math.max(peak, active)
                 const index = Number(
@@ -176,7 +219,12 @@ test("five independent Luna/high chunks complete concurrently and assemble in so
         parentSessionId: "parent",
         plan,
         turns,
-        params: { providerId: "vast", modelId: "qwen", agent: "assistant", variant: "low" },
+        params: {
+            providerId: "vast",
+            modelId: "qwen",
+            agent: "tennis-mc-specialist",
+            variant: "low",
+        },
         summaryModel: "openai/gpt-6-luna",
         summaryEffort: "high" as const,
         concurrency: 5,
@@ -190,4 +238,78 @@ test("five independent Luna/high chunks complete concurrently and assemble in so
     failChunk = 2
     assert.equal(await summarizePrefixChunks(input), null)
     assert.equal(calls, 10)
+})
+
+test("prefix synthesis sizes balanced calls against the chosen summary model", async () => {
+    const { plan, turns } = history(1_400)
+    for (const context of [30_000, 262_144]) {
+        let calls = 0
+        const sdk = {
+            provider: {
+                list: async () => ({
+                    data: {
+                        all: [
+                            {
+                                id: "openai",
+                                models: { "gpt-6-luna": { limit: { context } } },
+                            },
+                        ],
+                    },
+                }),
+            },
+            session: {
+                create: async () => ({ data: { id: `scratch-${++calls}` } }),
+                prompt: async ({ body }: any) => {
+                    const prompt = body.parts[0].text as string
+                    const index = Number(
+                        prompt.match(/Job 1: "prefix-chunk:stable-range:(\d)"/)?.[1],
+                    )
+                    assert.ok(index >= 0 && index < 5)
+                    assert.ok(
+                        countTokens(prompt) < context - Math.max(8_192, Math.ceil(context * 0.15)),
+                    )
+                    return {
+                        data: {
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: checkpoint(index).replace(
+                                        `- Resolved segment ${index} after reviewing its work.`,
+                                        Array.from(
+                                            { length: 70 },
+                                            (_, item) => `- Resolved decision ${index}.${item}.`,
+                                        ).join("\n"),
+                                    ),
+                                },
+                            ],
+                        },
+                    }
+                },
+                delete: async () => ({ data: true }),
+            },
+        }
+        const logger = new Logger(false)
+        const result = await summarizePrefixChunks({
+            client: sdk,
+            runtime: createRuntimeState(sdk, logger),
+            logger,
+            parentSessionId: "large-history",
+            plan,
+            turns,
+            params: { providerId: "vast", modelId: "qwen", agent: "assistant", variant: "low" },
+            summaryModel: "openai/gpt-6-luna",
+            summaryEffort: "inherit",
+            concurrency: 5,
+        })
+        if (context === 30_000) {
+            assert.equal(result, undefined)
+            assert.equal(calls, 0)
+        } else {
+            assert.equal(calls, 5)
+            assert.ok(result?.includes(`- ${userText}`))
+            assert.ok(
+                result!.indexOf("Resolved decision 0.0") < result!.indexOf("Resolved decision 4.0"),
+            )
+        }
+    }
 })

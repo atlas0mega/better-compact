@@ -667,7 +667,10 @@ test("manual prefix compaction synthesizes bounded turns without sending one gia
                         {
                             id: "openai",
                             models: {
-                                "gpt-6-luna": { variants: { high: {} } },
+                                "gpt-6-luna": {
+                                    variants: { high: {} },
+                                    limit: { context: 262_144 },
+                                },
                             },
                         },
                     ],

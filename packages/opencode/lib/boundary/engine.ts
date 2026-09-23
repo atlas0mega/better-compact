@@ -15,6 +15,8 @@ import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore } from "./transcripts"
 import { adaptiveTailUserTurns } from "./context"
 
+const PREFIX_CHUNK_VERSION = 2
+
 // The auto transform path: replay the session's cached plan when it still
 // holds, otherwise build, persist, and apply a fresh one. Mutates the
 // messages array in place only when the engine changed anything, and only
@@ -37,6 +39,11 @@ export async function processBoundaryTransform(input: {
 }): Promise<BoundaryContextPlan | null> {
     let prefixChunkAttempted = false
     const oldPlan = input.state.boundary.activePlan
+    const prefixChunkModel = input.config.compaction.summaryModel ?? "inherit"
+    const currentPrefixAttempt =
+        oldPlan?.prefixChunkAttempted === true &&
+        oldPlan.prefixChunkVersion === PREFIX_CHUNK_VERSION &&
+        oldPlan.prefixChunkModel === prefixChunkModel
     const ports: EnginePorts = {
         transcripts: createTranscriptStore(input.directory),
         plans: {
@@ -48,9 +55,12 @@ export async function processBoundaryTransform(input: {
                           {
                               ...snapshot,
                               ...(prefixChunkAttempted ||
-                              (oldPlan?.rangeHash === snapshot.rangeHash &&
-                                  oldPlan.prefixChunkAttempted)
-                                  ? { prefixChunkAttempted: true as const }
+                              (oldPlan?.rangeHash === snapshot.rangeHash && currentPrefixAttempt)
+                                  ? {
+                                        prefixChunkAttempted: true as const,
+                                        prefixChunkVersion: PREFIX_CHUNK_VERSION,
+                                        prefixChunkModel,
+                                    }
                                   : {}),
                           },
                           input.messages,
@@ -78,7 +88,7 @@ export async function processBoundaryTransform(input: {
     const migrateUnboundedPrefix =
         !!oldPlan?.requiresCustomCompaction &&
         oldPlan.afterPruneTokens > oldPlan.targetTokens &&
-        oldPlan.prefixChunkAttempted !== true &&
+        !currentPrefixAttempt &&
         (oldPlan.prefixSummary?.match(/^- Resume from prior assistant progress: /gm)?.length ??
             0) >= 12 &&
         profile.prefixSummary &&

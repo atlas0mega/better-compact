@@ -10,7 +10,8 @@ import {
 import { openCodeConventions } from "../codec"
 
 const MAX_CHUNKS = 5
-const MAX_CHUNK_TOKENS = 23_000
+const PREFERRED_CHUNK_TOKENS = 23_000
+const PROMPT_RESERVE_TOKENS = 200
 const PROGRESS_MARKER = "- Resume from prior assistant progress: "
 
 export interface PrefixChunk {
@@ -20,13 +21,14 @@ export interface PrefixChunk {
 
 // No sampling: if all old progress cannot fit in five bounded calls, retain
 // the deterministic prefix instead of silently discarding a historical slice.
-export function buildPrefixChunks(plan: BoundaryContextPlan): PrefixChunk[] {
+export function buildPrefixChunks(
+    plan: BoundaryContextPlan,
+    modelInputTokens = 24_000,
+): PrefixChunk[] {
     const source = plan.prefixSummary
     if (!plan.requiresCustomCompaction || !source) return []
     const facts = source.split("\n").filter((line) => line.startsWith(PROGRESS_MARKER))
     if (facts.length === 0) return []
-    const chunks: string[][] = []
-    let current: string[] = []
     const promptFor = (lines: string[]) =>
         [
             "Consolidate this chronological slice of historical assistant progress for the same ongoing task.",
@@ -38,36 +40,61 @@ export function buildPrefixChunks(plan: BoundaryContextPlan): PrefixChunk[] {
             "",
             ...lines,
         ].join("\n")
-    for (const fact of facts) {
-        if (countTokens(promptFor([...current, fact])) + 80 > MAX_CHUNK_TOKENS) {
-            if (current.length === 0) return []
-            chunks.push(current)
-            current = []
-        }
-        if (countTokens(promptFor([fact])) + 80 > MAX_CHUNK_TOKENS) return []
-        current.push(fact)
-        if (chunks.length >= MAX_CHUNKS) return []
+    const factCosts = facts.map((fact) => countTokens(fact + "\n"))
+    const total = factCosts.reduce((sum, cost) => sum + cost, 0)
+    const available = modelInputTokens - countTokens(promptFor([])) - PROMPT_RESERVE_TOKENS
+    if (available <= 0 || factCosts.some((cost) => cost > available)) return []
+    const preferred = Math.min(PREFERRED_CHUNK_TOKENS, available)
+    const initialCalls = Math.min(
+        MAX_CHUNKS,
+        facts.length,
+        Math.max(1, Math.ceil(total / preferred)),
+    )
+    // Increase call count only if the balanced partition exceeds the model's
+    // context. Never silently sample a slice to force a fit.
+    for (let calls = initialCalls; calls <= Math.min(MAX_CHUNKS, facts.length); calls++) {
+        const chunks = balancedChunks(facts, factCosts, calls)
+        let offset = 0
+        const planned = chunks.map((lines, index) => {
+            const start = offset + 1
+            offset += lines.length
+            const prompt = `${promptFor(lines)}\n\nProgress entries ${start}-${offset} of ${facts.length}.`
+            if (countTokens(prompt) + 80 > modelInputTokens) return null
+            return {
+                count: lines.length,
+                job: {
+                    key: `prefix-chunk:${plan.rangeHash}:${index}`,
+                    rangeStartMessageId: plan.transcript.messageIds[0] ?? "unknown",
+                    rangeEndMessageId: plan.transcript.messageIds.at(-1) ?? "unknown",
+                    transcriptRelativePath: plan.transcript.relativePath,
+                    prompt,
+                },
+            }
+        })
+        if (planned.every((chunk) => chunk !== null)) return planned as PrefixChunk[]
     }
-    if (current.length > 0) chunks.push(current)
-    if (chunks.length > MAX_CHUNKS) return []
-    let offset = 0
-    const planned = chunks.map((lines, index) => {
-        const start = offset + 1
-        offset += lines.length
-        const prompt = `${promptFor(lines)}\n\nProgress entries ${start}-${offset} of ${facts.length}.`
-        if (countTokens(prompt) + 80 > 24_000) return null
-        return {
-            count: lines.length,
-            job: {
-                key: `prefix-chunk:${plan.rangeHash}:${index}`,
-                rangeStartMessageId: plan.transcript.messageIds[0] ?? "unknown",
-                rangeEndMessageId: plan.transcript.messageIds.at(-1) ?? "unknown",
-                transcriptRelativePath: plan.transcript.relativePath,
-                prompt,
-            },
+    return []
+}
+
+function balancedChunks(facts: string[], costs: number[], calls: number): string[][] {
+    const chunks: string[][] = []
+    let cursor = 0
+    let remaining = costs.reduce((sum, cost) => sum + cost, 0)
+    for (let call = 0; call < calls; call++) {
+        const slots = calls - call
+        const target = remaining / slots
+        const lines: string[] = []
+        let used = 0
+        while (cursor < facts.length - slots + 1) {
+            const next = costs[cursor]
+            if (lines.length > 0 && Math.abs(used - target) <= Math.abs(used + next - target)) break
+            lines.push(facts[cursor++])
+            used += next
         }
-    })
-    return planned.some((chunk) => chunk === null) ? [] : (planned as PrefixChunk[])
+        chunks.push(lines)
+        remaining -= used
+    }
+    return chunks
 }
 
 export function assemblePrefixChunks(

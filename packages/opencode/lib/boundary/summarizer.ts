@@ -25,6 +25,7 @@ interface SummarizeBoundaryJobsInput {
         variant: string | undefined
     }
     concurrency?: number
+    maxBatchTokens?: number
     maxJobsPerBatch?: number
     rejectOversized?: boolean
     summaryEffort?: SummaryEffort
@@ -37,26 +38,7 @@ export async function summarizeBoundaryJobs(
 ): Promise<Record<string, string>> {
     if (input.summaryEffort === "off") return {}
     if (input.jobs.length === 0 || !canRunScratchSession(input.client)) return {}
-    const separator = input.summaryModel?.indexOf("/") ?? -1
-    const target =
-        separator > 0 && separator < input.summaryModel!.length - 1
-            ? {
-                  providerId: input.summaryModel!.slice(0, separator),
-                  modelId: input.summaryModel!.slice(separator + 1),
-              }
-            : undefined
-    const params = target
-        ? {
-              ...input.params,
-              ...target,
-              // A variant from the conversation model may not exist on this model.
-              variant:
-                  target.providerId === input.params.providerId &&
-                  target.modelId === input.params.modelId
-                      ? input.params.variant
-                      : undefined,
-          }
-        : input.params
+    const params = summaryModelParams(input)
     const variant = await resolveCompactionVariant(input.client, params, input.summaryEffort)
     return input.runtime.summaryScheduler.summarize({
         sessionKey: input.parentSessionId,
@@ -64,6 +46,7 @@ export async function summarizeBoundaryJobs(
         summarizer: createScratchSummarizer({ ...input, params: { ...params, variant } }),
         concurrency: input.concurrency,
         maxCalls: 5,
+        maxBatchTokens: input.maxBatchTokens,
         maxJobsPerBatch: input.maxJobsPerBatch,
         rejectOversized: input.rejectOversized,
         onProgress: input.onProgress,
@@ -76,11 +59,28 @@ export async function summarizePrefixChunks(
         turns: Turn[]
     },
 ): Promise<string | null | undefined> {
-    const chunks = buildPrefixChunks(input.plan)
+    if (input.summaryEffort === "off" || !canRunScratchSession(input.client)) return undefined
+    const target = summaryModelParams(input)
+    const context =
+        target.providerId && target.modelId
+            ? await input.runtime.resolveModelLimit(target.providerId, target.modelId)
+            : undefined
+    if (!context) {
+        input.logger.warn("Cannot size prefix chunks without the summary model context limit", {
+            sessionId: input.parentSessionId,
+            providerId: target.providerId,
+            modelId: target.modelId,
+        })
+        return undefined
+    }
+    // Leave headroom for OpenCode's instructions, the JSON wrapper and output.
+    const modelInputTokens = context - Math.max(8_192, Math.ceil(context * 0.15))
+    const chunks = buildPrefixChunks(input.plan, modelInputTokens)
     if (chunks.length === 0) return undefined
     const summaries = await summarizeBoundaryJobs({
         ...input,
         jobs: chunks.map((chunk) => chunk.job),
+        maxBatchTokens: modelInputTokens,
         maxJobsPerBatch: 1,
         rejectOversized: true,
     })
@@ -104,6 +104,26 @@ export async function summarizePrefixChunks(
     return assembled && countTokens(assembled) < countTokens(input.plan.prefixSummary ?? "")
         ? assembled
         : null
+}
+
+function summaryModelParams(
+    input: Pick<SummarizeBoundaryJobsInput, "params" | "summaryModel">,
+): SummarizeBoundaryJobsInput["params"] {
+    const model = input.summaryModel
+    const separator = model?.indexOf("/") ?? -1
+    if (!model || separator <= 0 || separator >= model.length - 1) return input.params
+    const providerId = model.slice(0, separator)
+    const modelId = model.slice(separator + 1)
+    return {
+        ...input.params,
+        providerId,
+        modelId,
+        // A variant from the conversation model may not exist on this model.
+        variant:
+            providerId === input.params.providerId && modelId === input.params.modelId
+                ? input.params.variant
+                : undefined,
+    }
 }
 
 /** Resolve only advertised variants; unsupported efforts retain the active variant. */
