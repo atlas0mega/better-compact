@@ -1549,6 +1549,81 @@ test("a last-resort prefix does not schedule invisible assistant-turn summaries"
     assert.ok(result.plan.prefixSummary?.includes("First task, keep this requirement."))
 })
 
+test("a bounded prefix synthesis replaces the fallback once and replays identically", async () => {
+    const turns = buildMultiRunConversation()
+    const options = inputs({
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+    })
+    const baseline = buildPlan(turns, options, spec)
+    assert.ok(baseline?.requiresCustomCompaction)
+    const summary = [
+        "## Decisions",
+        "- Completed work in src/app.ts with the current task intact.",
+        "## Files & Symbols",
+        "- src/app.ts",
+        "## Errors (verbatim)",
+        "- (none)",
+        "## What failed and why",
+        "- (none)",
+        "## Constraints",
+        "- First task, keep this requirement.",
+        "## Next step",
+        "- Continue the latest request.",
+    ].join("\n")
+    let saved: PlanSnapshot | null = null
+    let calls = 0
+    const ports = {
+        transcripts: { citablePath: options.citablePath, write: async () => ({}) },
+        plans: {
+            load: () => saved,
+            save: (_key: string, snapshot: PlanSnapshot | null) => {
+                saved = snapshot
+            },
+        },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    }
+    const engine = createEngine(spec, ports)
+    const first = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        summarizePrefix: async () => {
+            calls++
+            return summary
+        },
+    })
+    assert.equal(first.outcome, "planned")
+    if (first.outcome !== "planned") return
+    assert.equal(calls, 1)
+    assert.ok(first.plan.afterPruneTokens < baseline.afterPruneTokens)
+    assert.equal(first.plan.prefixSummary, summary)
+    assert.deepEqual(first.plan.summaryJobs, [])
+    const replay = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        summarizePrefix: async () => {
+            calls++
+            return summary
+        },
+    })
+    assert.equal(replay.outcome, "replayed")
+    if (replay.outcome === "replayed") assert.deepEqual(replay.turns, first.turns)
+    assert.equal(calls, 1)
+})
+
 test("planner triggers when either the provider total or the raw estimate crosses the trigger", () => {
     const turns = buildLargeConversation()
     const estimate = codec.estimateTurns(turns)

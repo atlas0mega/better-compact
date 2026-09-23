@@ -104,6 +104,21 @@ test("summary scheduler accepts an oversized structured summary", async () => {
     assert.match(stored, /^- Run pnpm test\.$/m)
 })
 
+test("chunk summaries reject oversized output rather than silently truncating facts", async () => {
+    const warnings: Array<{ message: string; data: unknown }> = []
+    const summaries = await createSummaryScheduler(logger(warnings)).summarize({
+        sessionKey: "session-prefix-chunk",
+        jobs: [job],
+        summarizer: {
+            complete: async () =>
+                validSummary.replace("- Keep the canonical parser.", `- ${"x".repeat(4_000)}`),
+        },
+        rejectOversized: true,
+    })
+    assert.deepEqual(summaries, {})
+    assert.ok(warnings.some((warning) => warning.message.includes("overlong")))
+})
+
 test("summary scheduler rejects a too-short response", async () => {
     const warnings: Array<{ message: string; data: unknown }> = []
     const scheduler = createSummaryScheduler(logger(warnings))

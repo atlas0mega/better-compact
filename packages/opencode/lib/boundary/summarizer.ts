@@ -1,12 +1,16 @@
 import {
+    countTokens,
+    type BoundaryContextPlan,
     type BoundarySummaryJob,
     type SummarizeProgressEvent,
     type Summarizer,
     type SummaryEffort,
+    type Turn,
 } from "@better-compact/core"
 import type { SessionCreateData } from "@opencode-ai/sdk/v2"
 import type { Logger } from "../logger"
 import type { RuntimeState } from "../state"
+import { assemblePrefixChunks, buildPrefixChunks } from "./prefix-chunks"
 
 interface SummarizeBoundaryJobsInput {
     client: any
@@ -21,6 +25,8 @@ interface SummarizeBoundaryJobsInput {
         variant: string | undefined
     }
     concurrency?: number
+    maxJobsPerBatch?: number
+    rejectOversized?: boolean
     summaryEffort?: SummaryEffort
     summaryModel?: string | null
     onProgress?: (event: SummarizeProgressEvent) => Promise<void> | void
@@ -58,8 +64,46 @@ export async function summarizeBoundaryJobs(
         summarizer: createScratchSummarizer({ ...input, params: { ...params, variant } }),
         concurrency: input.concurrency,
         maxCalls: 5,
+        maxJobsPerBatch: input.maxJobsPerBatch,
+        rejectOversized: input.rejectOversized,
         onProgress: input.onProgress,
     })
+}
+
+export async function summarizePrefixChunks(
+    input: Omit<SummarizeBoundaryJobsInput, "jobs"> & {
+        plan: BoundaryContextPlan
+        turns: Turn[]
+    },
+): Promise<string | null | undefined> {
+    const chunks = buildPrefixChunks(input.plan)
+    if (chunks.length === 0) return undefined
+    const summaries = await summarizeBoundaryJobs({
+        ...input,
+        jobs: chunks.map((chunk) => chunk.job),
+        maxJobsPerBatch: 1,
+        rejectOversized: true,
+    })
+    if (chunks.some((chunk) => !summaries[chunk.job.key])) return null
+    if (
+        chunks.some(
+            (chunk) => countTokens(summaries[chunk.job.key]) < Math.min(400, chunk.count * 2),
+        )
+    ) {
+        input.logger.warn("Chunked prefix summary omitted too much historical progress", {
+            sessionId: input.parentSessionId,
+        })
+        return null
+    }
+    const assembled = assemblePrefixChunks(
+        chunks,
+        summaries,
+        input.turns,
+        input.plan.rawTailStartIndex,
+    )
+    return assembled && countTokens(assembled) < countTokens(input.plan.prefixSummary ?? "")
+        ? assembled
+        : null
 }
 
 /** Resolve only advertised variants; unsupported efforts retain the active variant. */
@@ -97,11 +141,14 @@ function createScratchSummarizer(input: SummarizeBoundaryJobsInput): Summarizer 
     return {
         complete: (job) => runScratchSummary(input, [job], job.prompt),
         async completeBatch(jobs) {
+            const prefixChunks = jobs.every((job) => job.key.startsWith("prefix-chunk:"))
             const prompt = [
-                `Summarize ${jobs.length} independent historical assistant turns.`,
+                prefixChunks
+                    ? `Consolidate ${jobs.length} chronological history segments.`
+                    : `Summarize ${jobs.length} independent historical assistant turns.`,
                 "Return ONLY a JSON object mapping each job key to its own Markdown summary.",
                 "Each summary must contain the six headings specified in its job prompt, in order.",
-                `Keep each summary within 4000 characters and the full JSON response within about ${Math.ceil(4_000 * Math.sqrt(jobs.length))} characters. Give larger turns proportionally more detail; do not combine turns or omit keys.`,
+                `Keep each summary within 4000 characters and the full JSON response within about ${Math.ceil(4_000 * Math.sqrt(jobs.length))} characters. Preserve each assigned ${prefixChunks ? "segment" : "turn"}; do not combine jobs or omit keys.`,
                 ...jobs.map((job, index) =>
                     [`\n--- Job ${index + 1}: ${JSON.stringify(job.key)} ---`, job.prompt].join(
                         "\n",
@@ -110,11 +157,16 @@ function createScratchSummarizer(input: SummarizeBoundaryJobsInput): Summarizer 
             ].join("\n")
             const text = await runScratchSummary(input, jobs, prompt)
             if (!text) return null
-            if (jobs.length === 1 && text.trimStart().startsWith("## Decisions")) {
-                return { [jobs[0].key]: text }
+            const unwrapped = text
+                .trim()
+                .replace(/^```(?:markdown|md|json)?\s*\n?/i, "")
+                .replace(/\n?```$/, "")
+                .trim()
+            if (jobs.length === 1 && unwrapped.startsWith("## Decisions")) {
+                return { [jobs[0].key]: unwrapped }
             }
             try {
-                const json = text
+                const json = unwrapped
                     .trim()
                     .replace(/^```(?:json)?\s*\n?/i, "")
                     .replace(/\n?```$/, "")

@@ -59,6 +59,8 @@ export interface BoundaryPlanSnapshot extends PlanSnapshot {
     // Absent in snapshots created before generated plugin prompts were
     // classified as tool-like. Used to replan older affected sessions once.
     pluginInjectionPruning?: true
+    // Prevent repeatedly paying for a chunk synthesis on an unchanged range.
+    prefixChunkAttempted?: true
 }
 
 export interface BoundaryState {

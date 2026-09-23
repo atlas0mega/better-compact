@@ -400,6 +400,105 @@ test("sparse user turns advance the raw boundary without splitting or losing mes
     assert.deepEqual(repeated, messages)
 })
 
+test("an older deterministic prefix gets one bounded synthesis attempt below trigger", async () => {
+    const messages = [
+        message("user-old", "user", [textPart("user-old", "Keep this original requirement")], 1),
+        ...Array.from({ length: 20 }, (_, index) =>
+            message(
+                `assistant-${index}`,
+                "assistant",
+                [
+                    textPart(
+                        `assistant-${index}`,
+                        `Finished step ${index}: ${"implementation detail ".repeat(40)}`,
+                    ),
+                ],
+                index + 2,
+            ),
+        ),
+        message("user-middle", "user", [textPart("user-middle", "Continue")], 25),
+        message(
+            "assistant-tail",
+            "assistant",
+            [textPart("assistant-tail", "Most recent work")],
+            26,
+        ),
+        message("user-current", "user", [textPart("user-current", "Current task")], 27),
+    ]
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-old-prefix-"))
+    const config = getConfig({ directory, worktree: directory, client: {} } as never, {
+        warnings: false,
+    })
+    config.compaction.preset = "custom"
+    config.compaction.custom = {
+        ...config.compaction.custom,
+        triggerPercent: 85,
+        targetPercent: 22,
+        prefixSummary: true,
+    }
+    config.compaction.triggerTokens = 175_000
+    config.compaction.targetTokens = 1_000
+    const minTailUserTurns = adaptiveTailUserTurns(messages, 200_000, 22, 1_000)
+    const oldPlan = buildBoundaryContextPlan(messages, {
+        contextLimit: 200_000,
+        force: true,
+        triggerTokens: 175_000,
+        targetTokens: 1_000,
+        minTailUserTurns,
+        prefixSummaryAllowed: true,
+    })
+    assert.ok(oldPlan)
+    const oldPrefix = formatPrefixSummary(openCodeCodec.encode(messages.slice(0, -1)))
+    assert.ok((oldPrefix.match(/^- Resume from prior assistant progress: /gm)?.length ?? 0) >= 12)
+    const oldSnapshot = {
+        ...toBoundaryPlanSnapshot(oldPlan, messages),
+        requiresCustomCompaction: true,
+        prefixSummary: oldPrefix,
+        afterPruneTokens: 5_000,
+    }
+    const state = createSessionState()
+    state.sessionId = sessionID
+    state.modelContextLimit = 200_000
+    state.boundary.activePlan = oldSnapshot
+    const logger = new Logger(false)
+    let calls = 0
+    const first = structuredClone(messages)
+    assert.ok(
+        await processBoundaryTransform({
+            state,
+            logger,
+            config,
+            directory,
+            messages: first,
+            summariesAllowed: true,
+            summarizePrefix: async () => {
+                calls++
+                return null
+            },
+        }),
+    )
+    assert.equal(calls, 1)
+    assert.equal(state.boundary.activePlan?.prefixChunkAttempted, true)
+    const replay = structuredClone(messages)
+    assert.equal(
+        await processBoundaryTransform({
+            state,
+            logger,
+            config,
+            directory,
+            messages: replay,
+            summariesAllowed: true,
+            summarizePrefix: async () => {
+                calls++
+                return null
+            },
+        }),
+        null,
+    )
+    assert.equal(calls, 1)
+    assert.deepEqual(replay, first)
+})
+
 test("prefix summary keeps only the latest goal continuation even when objectives change", async () => {
     const objective = "implement the complete feature ".repeat(120)
     const first = goalContinuation(objective, 900)

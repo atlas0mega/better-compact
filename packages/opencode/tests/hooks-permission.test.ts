@@ -652,6 +652,115 @@ test("manual compaction rejects verbose turn summaries that increase live contex
     )
 })
 
+test("manual prefix compaction synthesizes bounded turns without sending one giant transcript", async () => {
+    const sessionId = `ses-prefix-chunks-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionId)
+    const config = profileEscalationConfig(true, 45)
+    config.compaction.summaryEffort = "high"
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    let prompts = 0
+    const sdk = {
+        provider: {
+            list: async () => ({
+                data: {
+                    all: [
+                        {
+                            id: "openai",
+                            models: {
+                                "gpt-6-luna": { variants: { high: {} } },
+                            },
+                        },
+                    ],
+                },
+            }),
+        },
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+            create: async () => ({ data: { id: `scratch-${sessionId}` } }),
+            prompt: async ({ body }: any) => {
+                if (body.noReply) return { data: true }
+                prompts++
+                assert.deepEqual(body.model, { providerID: "openai", modelID: "gpt-6-luna" })
+                assert.equal(body.variant, "high")
+                assert.match(body.parts[0].text, /Consolidate this chronological slice/)
+                assert.ok(body.parts[0].text.length < 50_000)
+                assert.doesNotMatch(
+                    body.parts[0].text,
+                    /Source transcript:\n# Better Compact Raw Transcript/,
+                )
+                return {
+                    data: {
+                        parts: [
+                            {
+                                type: "text",
+                                text: [
+                                    "## Decisions",
+                                    "- Completed src/app.ts while keeping the active task intact.",
+                                    "## Files & Symbols",
+                                    "- src/app.ts",
+                                    "## Errors (verbatim)",
+                                    "- (none)",
+                                    "## What failed and why",
+                                    "- (none)",
+                                    "## Constraints",
+                                    "- Keep user requirements.",
+                                    "## Next step",
+                                    "- Validate the latest implementation.",
+                                ].join("\n"),
+                            },
+                        ],
+                    },
+                }
+            },
+            delete: async () => ({ data: true }),
+        },
+    }
+    const logger = new Logger(false)
+    const runtime = createRuntimeState(sdk, logger)
+    const state = runtime.get(sessionId)
+    state.modelContextLimit = 50_000
+    const handler = createChatMessageHandler(
+        sdk as any,
+        runtime,
+        logger,
+        config,
+        mkdtempSync(join(tmpdir(), "better-compact-prefix-chunks-")),
+        { global: undefined, agents: {} },
+    )
+    await handler(
+        { sessionID: sessionId, model: { providerID: "anthropic", modelID: "claude-test" } },
+        {
+            message: { agent: "assistant" },
+            parts: [
+                {
+                    type: "text",
+                    ignored: true,
+                    metadata: {
+                        betterCompact: "run",
+                        contextLimit: 50_000,
+                        summaryProviderID: "anthropic",
+                        summaryModelID: "claude-test",
+                    },
+                },
+            ],
+        },
+    )
+    await waitFor(() => state.boundary.job?.status === "completed")
+    assert.equal(prompts, 1)
+    assert.equal(state.boundary.job?.counters.summaryJobsDone, 1)
+    assert.equal(state.boundary.activePlan?.prefixChunkAttempted, true)
+    assert.match(state.boundary.activePlan?.prefixSummary ?? "", /Important instruction/)
+    assert.match(
+        state.boundary.activePlan?.prefixSummary ?? "",
+        /Validate the latest implementation/,
+    )
+    assert.doesNotMatch(
+        state.boundary.activePlan?.prefixSummary ?? "",
+        /Resume from prior assistant progress:/,
+    )
+})
+
 test("auto transform path never prunes when compress permission is deny", async () => {
     const sessionId = `ses-transform-deny-${Date.now()}`
     const messages = buildOverTriggerConversation(sessionId)

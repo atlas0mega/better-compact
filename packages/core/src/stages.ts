@@ -229,6 +229,29 @@ export function formatPrefixSummary(
     conventions?: Conventions,
     rawTail: Turn[] = [],
 ): string {
+    const userMessages = prefixUserMessages(turns, conventions, rawTail)
+    const assistantFacts = turns
+        .filter((turn) => turn.role === "assistant")
+        .map((turn) => turnText(turn).trim())
+        .filter(Boolean)
+
+    return formatSummarySections([
+        [],
+        [],
+        [],
+        [],
+        userMessages,
+        assistantFacts.map(
+            (text) => `Resume from prior assistant progress: ${formatSummaryItem(text)}`,
+        ),
+    ])
+}
+
+export function prefixUserMessages(
+    turns: Turn[],
+    conventions?: Conventions,
+    rawTail: Turn[] = [],
+): string[] {
     // User instructions are the contract the session answers to: they carry
     // through the summary byte-for-byte, never rewrapped or truncated. The
     // platform can identify generated prompts that supersede earlier ones;
@@ -244,7 +267,7 @@ export function formatPrefixSummary(
             .map((item) => conventions?.repeatableUserTextKey?.(item.text))
             .filter((key): key is string => key !== null && key !== undefined),
     )
-    const userMessages = turns
+    return turns
         .filter((turn) => turn.role === "user" && !turn.ephemeral)
         .flatMap((turn) =>
             turn.items
@@ -264,21 +287,6 @@ export function formatPrefixSummary(
             return true
         })
         .reverse()
-    const assistantFacts = turns
-        .filter((turn) => turn.role === "assistant")
-        .map((turn) => turnText(turn).trim())
-        .filter(Boolean)
-
-    return formatSummarySections([
-        [],
-        [],
-        [],
-        [],
-        userMessages,
-        assistantFacts.map(
-            (text) => `Resume from prior assistant progress: ${formatSummaryItem(text)}`,
-        ),
-    ])
 }
 
 // Older stored plans may already contain full copies of generated prompts.

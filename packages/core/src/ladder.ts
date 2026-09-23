@@ -477,6 +477,10 @@ export interface Engine {
         // fresh plan queues summary jobs, the engine runs them and rebuilds
         // the plan with the accepted summaries before persisting it.
         summarize?: (jobs: BoundarySummaryJob[]) => Promise<Record<string, string>>
+        summarizePrefix?: (
+            plan: BoundaryContextPlan,
+            turns: Turn[],
+        ) => Promise<string | null | undefined>
     }): Promise<ProcessResult>
 }
 
@@ -501,6 +505,7 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             collapsePercent,
             force,
             summarize,
+            summarizePrefix,
         }) {
             let staleSnapshotCleared = false
             let tailPolicyChanged = false
@@ -569,9 +574,47 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             // Once a prefix summary replaces all old turns, individual turn
             // summaries are no longer visible. Only a rolling prefix job can
             // improve that plan; avoid charging for discarded turn jobs.
-            const activeJobs = plan.requiresCustomCompaction
-                ? plan.summaryJobs.filter((job) => job.key.startsWith("prefix-summary:"))
-                : plan.summaryJobs
+            let prefixAttempted = false
+            if (
+                summarizePrefix &&
+                plan.requiresCustomCompaction &&
+                plan.afterPruneTokens > plan.targetTokens
+            ) {
+                try {
+                    const replacement = await summarizePrefix(plan, turns)
+                    prefixAttempted = replacement !== undefined
+                    if (replacement) {
+                        const rebuilt = buildPlan(
+                            turns,
+                            {
+                                ...inputs,
+                                priorPlan: toPlanSnapshot(plan),
+                                prefixSummary: replacement,
+                            },
+                            spec,
+                        )
+                        if (
+                            rebuilt?.requiresCustomCompaction &&
+                            rebuilt.afterPruneTokens < plan.afterPruneTokens
+                        )
+                            plan = rebuilt
+                    }
+                } catch (error) {
+                    prefixAttempted = true
+                    ports.logger.warn(
+                        "Chunked prefix summary failed; retaining deterministic plan",
+                        {
+                            sessionId: sessionKey,
+                            error: error instanceof Error ? error.message : String(error),
+                        },
+                    )
+                }
+            }
+            const activeJobs = prefixAttempted
+                ? []
+                : plan.requiresCustomCompaction
+                  ? plan.summaryJobs.filter((job) => job.key.startsWith("prefix-summary:"))
+                  : plan.summaryJobs
             if (summarize && activeJobs.length > 0) {
                 try {
                     const assistantSummaries = await summarize(activeJobs)

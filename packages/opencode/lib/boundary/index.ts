@@ -1,5 +1,6 @@
 export * from "./context"
 export * from "./engine"
 export * from "./progress"
+export * from "./prefix-chunks"
 export * from "./report"
 export * from "./summarizer"

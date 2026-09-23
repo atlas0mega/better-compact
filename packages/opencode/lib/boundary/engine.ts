@@ -30,7 +30,13 @@ export async function processBoundaryTransform(input: {
     providerReportedTokens?: number
     summariesAllowed?: boolean
     summarize?: (jobs: BoundarySummaryJob[]) => Promise<Record<string, string>>
+    summarizePrefix?: (
+        plan: BoundaryContextPlan,
+        turns: import("@better-compact/core").Turn[],
+    ) => Promise<string | null | undefined>
 }): Promise<BoundaryContextPlan | null> {
+    let prefixChunkAttempted = false
+    const oldPlan = input.state.boundary.activePlan
     const ports: EnginePorts = {
         transcripts: createTranscriptStore(input.directory),
         plans: {
@@ -38,7 +44,17 @@ export async function processBoundaryTransform(input: {
             save: async (_sessionKey, snapshot) => {
                 const previous = input.state.boundary.activePlan
                 input.state.boundary.activePlan = snapshot
-                    ? stampForkIdentity(snapshot, input.messages)
+                    ? stampForkIdentity(
+                          {
+                              ...snapshot,
+                              ...(prefixChunkAttempted ||
+                              (oldPlan?.rangeHash === snapshot.rangeHash &&
+                                  oldPlan.prefixChunkAttempted)
+                                  ? { prefixChunkAttempted: true as const }
+                                  : {}),
+                          },
+                          input.messages,
+                      )
                     : null
                 try {
                     await saveSessionState(input.state, input.logger)
@@ -51,7 +67,6 @@ export async function processBoundaryTransform(input: {
         logger: input.logger,
     }
     const profile = resolveCompactionProfile(input.config)
-    const oldPlan = input.state.boundary.activePlan
     const oldTailIndex = oldPlan
         ? input.messages.findIndex((message) => message.info.id === oldPlan.rawTailStartMessageId)
         : -1
@@ -60,6 +75,15 @@ export async function processBoundaryTransform(input: {
         oldPlan.pluginInjectionPruning !== true &&
         oldTailIndex > 0 &&
         input.messages.slice(0, oldTailIndex).some(isSyndicatePluginInjection)
+    const migrateUnboundedPrefix =
+        !!oldPlan?.requiresCustomCompaction &&
+        oldPlan.afterPruneTokens > oldPlan.targetTokens &&
+        oldPlan.prefixChunkAttempted !== true &&
+        (oldPlan.prefixSummary?.match(/^- Resume from prior assistant progress: /gm)?.length ??
+            0) >= 12 &&
+        profile.prefixSummary &&
+        input.summariesAllowed !== false &&
+        !!input.summarizePrefix
     const engine = createEngine(openCodeSpec, ports)
     const result = await engine.process({
         sessionKey: sessionKeyOf(input.messages),
@@ -81,7 +105,14 @@ export async function processBoundaryTransform(input: {
         providerReportedTokens: input.providerReportedTokens,
         summariesAllowed: input.summariesAllowed,
         summarize: input.summariesAllowed === false ? undefined : input.summarize,
-        force: migratePluginInjections,
+        summarizePrefix:
+            input.summariesAllowed === false || !input.summarizePrefix
+                ? undefined
+                : async (plan, turns) => {
+                      prefixChunkAttempted = true
+                      return input.summarizePrefix!(plan, turns)
+                  },
+        force: migratePluginInjections || migrateUnboundedPrefix,
     })
     if (result.outcome === "unchanged") return null
     const decoded = openCodeCodec.decode(result.turns, input.messages)

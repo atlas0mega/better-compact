@@ -39,6 +39,8 @@ export interface SummarizeJobsInput {
     targetBatchTokens?: number
     maxBatchTokens?: number
     maxJobsPerBatch?: number
+    /** Preserve a complete chunk summary or fall back; never truncate it. */
+    rejectOversized?: boolean
     onProgress?: (event: SummarizeProgressEvent) => Promise<void> | void
 }
 
@@ -96,7 +98,15 @@ export function createSummaryScheduler(
             for (let offset = 0; offset < pending.length; offset += concurrency) {
                 const jobs = pending.slice(offset, offset + concurrency)
                 const outcomes = await Promise.all(
-                    jobs.map((job) => runJob(input.sessionKey, job, input.summarizer, logger)),
+                    jobs.map((job) =>
+                        runJob(
+                            input.sessionKey,
+                            job,
+                            input.summarizer,
+                            logger,
+                            input.rejectOversized,
+                        ),
+                    ),
                 )
 
                 for (let index = 0; index < jobs.length; index++) {
@@ -223,7 +233,7 @@ async function summarizeBatches(
             for (const job of group) {
                 const value =
                     output && typeof output[job.key] === "string"
-                        ? validateSummary(output[job.key], job, logger)
+                        ? validateSummary(output[job.key], job, logger, input.rejectOversized)
                         : null
                 if (value) {
                     summaries[job.key] = value
@@ -254,10 +264,11 @@ async function runJob(
     job: BoundarySummaryJob,
     summarizer: Summarizer,
     logger: Logger,
+    rejectOversized?: boolean,
 ): Promise<string | null> {
     try {
         const raw = await summarizer.complete(job)
-        return raw === null ? null : validateSummary(raw, job, logger)
+        return raw === null ? null : validateSummary(raw, job, logger, rejectOversized)
     } catch (error) {
         logger.warn("Summary job failed", {
             sessionKey,
@@ -392,7 +403,12 @@ function dedupeJobs(jobs: BoundarySummaryJob[]): BoundarySummaryJob[] {
     })
 }
 
-function validateSummary(text: string, job: BoundarySummaryJob, logger: Logger): string | null {
+function validateSummary(
+    text: string,
+    job: BoundarySummaryJob,
+    logger: Logger,
+    rejectOversized = false,
+): string | null {
     const summary = text.trim()
     const lines = summary.split(/\r\n|\n|\r/).map((line) => line.trim())
     let headerIndex = -1
@@ -407,6 +423,13 @@ function validateSummary(text: string, job: BoundarySummaryJob, logger: Logger):
             rangeEndMessageId: job.rangeEndMessageId,
             length: summary.length,
             hasRequiredSections,
+        })
+        return null
+    }
+    if (rejectOversized && summary.length > MAX_SUMMARY_CHARS) {
+        logger.warn("Discarded overlong Better Compact chunk summary", {
+            rangeStartMessageId: job.rangeStartMessageId,
+            length: summary.length,
         })
         return null
     }
