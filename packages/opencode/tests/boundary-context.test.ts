@@ -84,11 +84,11 @@ test("ignored Better Compact messages do not count as protected user turns", () 
     assert.equal(plan.rawTailStartMessageId, "msg-user-2")
 })
 
-test("prefix summary keeps the latest copy of a generated goal continuation", async () => {
+test("prefix summary keeps only the latest goal continuation even when objectives change", async () => {
     const objective = "implement the complete feature ".repeat(120)
     const first = goalContinuation(objective, 900)
     const second = goalContinuation(objective, 600)
-    const latest = goalContinuation(objective, 300)
+    const latest = goalContinuation("new active objective", 300)
     const different = goalContinuation("a different objective", 100)
     const messages = [
         message("u-1", "user", [textPart("u-1", first)], 1),
@@ -111,13 +111,15 @@ test("prefix summary keeps the latest copy of a generated goal continuation", as
     assert.ok(plan.prefixSummary?.includes(latest))
     assert.ok(!plan.prefixSummary?.includes(first))
     assert.ok(!plan.prefixSummary?.includes(second))
-    assert.ok(plan.prefixSummary?.includes(different))
+    assert.ok(!plan.prefixSummary?.includes(different))
     assert.ok(plan.prefixSummary?.includes("Please keep this instruction exactly."))
     assert.deepEqual(plan.transcript.messageIds.slice(0, 3), ["u-1", "a-1", "u-2"])
 
     // A previous version's stored plan may still contain every continuation.
     const oldSummary = formatPrefixSummary(openCodeCodec.encode(messages.slice(0, 10)))
-    assert.ok(oldSummary.includes(first) && oldSummary.includes(second))
+    assert.ok(
+        oldSummary.includes(first) && oldSummary.includes(second) && oldSummary.includes(different),
+    )
     const legacySnapshot = { ...toBoundaryPlanSnapshot(plan, messages), prefixSummary: oldSummary }
     const replacement = buildBoundaryContextPlan(messages, {
         contextLimit: 500,
@@ -127,6 +129,7 @@ test("prefix summary keeps the latest copy of a generated goal continuation", as
     assert.ok(replacement?.prefixSummary?.includes(latest))
     assert.ok(!replacement.prefixSummary.includes(first))
     assert.ok(!replacement.prefixSummary.includes(second))
+    assert.ok(!replacement.prefixSummary.includes(different))
     assert.ok(replacement.prefixSummary.includes("Please keep this instruction exactly."))
 
     const replayed = structuredClone(messages)
@@ -138,6 +141,7 @@ test("prefix summary keeps the latest copy of a generated goal continuation", as
     assert.ok(replayedText?.includes(latest))
     assert.ok(!replayedText.includes(first))
     assert.ok(!replayedText.includes(second))
+    assert.ok(!replayedText.includes(different))
 
     // An eligible cached plan also persists the cleaned summary on replay.
     const cached = { ...legacySnapshot, triggerTokens: 100_000 }
@@ -162,15 +166,15 @@ test("prefix summary keeps the latest copy of a generated goal continuation", as
     assert.ok(saved?.prefixSummary?.includes(latest))
     assert.ok(!saved.prefixSummary.includes(first))
     assert.ok(!saved.prefixSummary.includes(second))
+    assert.ok(!saved.prefixSummary.includes(different))
 
     // If a still newer copy is in the protected raw tail, the prefix keeps none.
     const prefix = openCodeCodec.encode(messages.slice(0, 10))
     const rawTail = openCodeCodec.encode([
-        message("u-tail", "user", [textPart("u-tail", goalContinuation(objective, 100))], 14),
+        message("u-tail", "user", [textPart("u-tail", goalContinuation("final goal", 100))], 14),
     ])
     const summary = formatPrefixSummary(prefix, openCodeConventions, rawTail)
-    assert.ok(!summary.includes("implement the complete feature"))
-    assert.ok(summary.includes(different))
+    assert.ok(!summary.includes("Continue working toward the active session goal."))
     assert.ok(summary.includes("Please keep this instruction exactly."))
 })
 

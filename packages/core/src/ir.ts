@@ -56,8 +56,9 @@ export interface Codec<Native> extends CodecOps {
 // that needs a missing convention simply finds nothing to act on.
 export interface Conventions {
     isSkillItem?(item: Item): boolean
-    // Key for a repeatable generated user prompt. When a prefix is summarized,
-    // retain only its latest copy (or none if a newer copy is still in the raw tail).
+    // Category of a supersedable generated user prompt. When a prefix is summarized,
+    // retain only the latest in that category, even if its content has changed
+    // (or none if a newer copy is still in the raw tail).
     repeatableUserTextKey?(text: string): string | null
     tool?(item: Extract<Item, { kind: "tool" }>): {
         name: string

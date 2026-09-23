@@ -88,10 +88,9 @@ export const openCodeConventions: Conventions = {
             )
         )
             return null
-        const objective = text.match(
-            /<untrusted_objective>\n([\s\S]*?)\n<\/untrusted_objective>/,
-        )?.[1]
-        return objective === undefined ? null : `goal-continuation:${objective}`
+        return /<untrusted_objective>\n[\s\S]*?\n<\/untrusted_objective>/.test(text)
+            ? "goal-continuation"
+            : null
     },
     tool: (item) => {
         const part = toolPartOf(item)

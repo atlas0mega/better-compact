@@ -223,7 +223,7 @@ export function formatPrefixSummary(
 ): string {
     // User instructions are the contract the session answers to: they carry
     // through the summary byte-for-byte, never rewrapped or truncated. The
-    // platform can identify generated prompts that repeat the same instruction;
+    // platform can identify generated prompts that supersede earlier ones;
     // only their latest copy needs to survive in the live context.
     const seen = new Set(
         rawTail
@@ -274,7 +274,7 @@ export function formatPrefixSummary(
 }
 
 // Older stored plans may already contain full copies of generated prompts.
-// Remove only exact historical copies that were included by the deterministic
+// Remove only exact historical prompts that were included by the deterministic
 // fallback; a hand-written or model-generated summary remains untouched.
 export function dedupeRepeatableUserTextInSummary(
     summary: string,
