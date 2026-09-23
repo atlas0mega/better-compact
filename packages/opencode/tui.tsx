@@ -37,6 +37,7 @@ const tui: TuiPluginModule["tui"] = async (api) => {
                 const settings = currentConfig.compaction
                 const profile = resolveCompactionProfile(currentConfig, settings)
                 const usage = currentContextUsage(api, sessionID)
+                const agent = api.state.session.get(sessionID)?.agent
                 const summaryVariant =
                     settings.summaryEffort === "inherit"
                         ? usage.variant
@@ -48,7 +49,11 @@ const tui: TuiPluginModule["tui"] = async (api) => {
                         existingJob?.status === "running" &&
                         Date.now() - existingJob.updatedAt < 5 * 60 * 1000
                     ) {
-                        showError(api, "Better Compact", "Compaction is already running for this session.")
+                        showError(
+                            api,
+                            "Better Compact",
+                            "Compaction is already running for this session.",
+                        )
                         return
                     }
                     const initialJob = createBoundaryJob({
@@ -66,6 +71,7 @@ const tui: TuiPluginModule["tui"] = async (api) => {
                     try {
                         await api.client.session.prompt({
                             sessionID,
+                            agent,
                             model:
                                 usage.providerID && usage.modelID
                                     ? { providerID: usage.providerID, modelID: usage.modelID }
