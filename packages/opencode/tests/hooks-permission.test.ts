@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { PluginConfig } from "../lib/config"
+import { buildBoundaryContextPlan } from "../lib/boundary"
 import {
     createChatMessageHandler,
     createChatMessageTransformHandler,
@@ -546,6 +547,109 @@ test("manual TUI compaction routes scratch summaries to the configured model eff
         assert.equal(prompt.body.variant, "high")
     }
     assert.ok((state.boundary.job?.counters.summaryJobsSucceeded ?? 0) > 0)
+})
+
+test("manual compaction rejects verbose turn summaries that increase live context", async () => {
+    const sessionId = `ses-summary-growth-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionId)
+    const config = profileEscalationConfig(false, 10)
+    config.compaction.summaryEffort = "high"
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    const baseline = buildBoundaryContextPlan(messages, {
+        contextLimit: 50_000,
+        force: true,
+        triggerRatio: 0.01,
+        targetRatio: 0.01,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: false,
+        collapsePercent: 10,
+        summariesAllowed: true,
+    })
+    assert.ok(baseline?.summaryJobs.length)
+    const verboseSummary = [
+        "## Decisions",
+        `- ${"Detailed but redundant work. ".repeat(115)}`,
+        "## Files & Symbols",
+        "- src/app.ts",
+        "## Errors (verbatim)",
+        "- (none)",
+        "## What failed and why",
+        "- (none)",
+        "## Constraints",
+        "- Preserve the contract.",
+        "## Next step",
+        "- Continue implementation.",
+    ].join("\n")
+    let calls = 0
+    const client = {
+        provider: {
+            list: async () => ({
+                data: {
+                    all: [
+                        {
+                            id: "openai",
+                            models: {
+                                "gpt-6-luna": { variants: { high: {} } },
+                            },
+                        },
+                    ],
+                },
+            }),
+        },
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+            create: async () => ({ data: { id: `scratch-${sessionId}` } }),
+            prompt: async ({ body }: any) => {
+                if (body.noReply) return { data: true }
+                calls++
+                return { data: { parts: [{ type: "text", text: verboseSummary }] } }
+            },
+            delete: async () => ({ data: true }),
+        },
+    }
+    const logger = new Logger(false)
+    const runtime = createRuntimeState(client, logger)
+    const state = runtime.get(sessionId)
+    state.modelContextLimit = 50_000
+    const handler = createChatMessageHandler(
+        client as any,
+        runtime,
+        logger,
+        config,
+        mkdtempSync(join(tmpdir(), "better-compact-summary-growth-")),
+        { global: undefined, agents: {} },
+    )
+    await handler(
+        { sessionID: sessionId, model: { providerID: "anthropic", modelID: "claude-test" } },
+        {
+            message: { agent: "assistant" },
+            parts: [
+                {
+                    type: "text",
+                    ignored: true,
+                    metadata: {
+                        betterCompact: "run",
+                        contextLimit: 50_000,
+                        summaryProviderID: "anthropic",
+                        summaryModelID: "claude-test",
+                    },
+                },
+            ],
+        },
+    )
+    await waitFor(() => state.boundary.job?.status === "completed")
+    assert.ok(calls > 0)
+    assert.ok((state.boundary.job?.counters.summaryJobsSucceeded ?? 0) > 0)
+    assert.ok(
+        (state.boundary.activePlan?.afterPruneTokens ?? Infinity) <= baseline.afterPruneTokens,
+    )
+    assert.deepEqual(state.boundary.activePlan?.assistantSummaries, {})
+    assert.ok(
+        state.boundary.job?.stages.some(
+            (stage) => stage.id === "assistant-runs" && stage.detail?.includes("0/"),
+        ),
+    )
 })
 
 test("auto transform path never prunes when compress permission is deny", async () => {

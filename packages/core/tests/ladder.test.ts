@@ -1455,6 +1455,100 @@ test("engine keeps the deterministic plan when summary scheduling rejects", asyn
     assert.ok(warnings.includes("Summary scheduling failed; using deterministic fallback"))
 })
 
+test("verbose keyed turn summaries cannot enlarge a saved plan", async () => {
+    const turns = buildMultiRunConversation()
+    const planInputs = inputs({
+        contextLimit: 40_000,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: false,
+    })
+    const baseline = buildPlan(turns, planInputs, spec)
+    assert.ok(baseline?.summaryJobs.length)
+    let snapshot: PlanSnapshot | null = null
+    const engine = createEngine(spec, {
+        transcripts: { citablePath: planInputs.citablePath, write: async () => ({}) },
+        plans: {
+            load: () => null,
+            save: (_key, plan) => {
+                snapshot = plan
+            },
+        },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    })
+    const result = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: false,
+        summarize: async (jobs) =>
+            Object.fromEntries(
+                jobs.map((job) => [
+                    job.key,
+                    [
+                        "## Decisions",
+                        `- ${"Rich but verbose historical detail. ".repeat(100)}`,
+                        "## Files & Symbols",
+                        "- src/file.ts",
+                        "## Errors (verbatim)",
+                        "- (none)",
+                        "## What failed and why",
+                        "- (none)",
+                        "## Constraints",
+                        "- Keep the original requirement.",
+                        "## Next step",
+                        "- Continue working.",
+                    ].join("\n"),
+                ]),
+            ),
+    })
+    assert.equal(result.outcome, "planned")
+    if (result.outcome !== "planned") return
+    assert.ok(result.plan.afterPruneTokens <= baseline.afterPruneTokens)
+    assert.deepEqual(result.plan.assistantSummaries, {})
+    assert.deepEqual(replayPlanSnapshot(turns, snapshot!, spec), result.turns)
+    assert.equal(turns[1].items[1].kind, "text")
+})
+
+test("a last-resort prefix does not schedule invisible assistant-turn summaries", async () => {
+    const turns = buildMultiRunConversation()
+    const planInputs = inputs({
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+    })
+    const baseline = buildPlan(turns, planInputs, spec)
+    assert.ok(baseline?.requiresCustomCompaction)
+    assert.equal(baseline.summaryJobs.length, 0)
+    const engine = createEngine(spec, {
+        transcripts: { citablePath: planInputs.citablePath, write: async () => ({}) },
+        plans: { load: () => null, save: () => {} },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    })
+    let calls = 0
+    const result = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        summarize: async () => {
+            calls++
+            return {}
+        },
+    })
+    assert.equal(result.outcome, "planned")
+    if (result.outcome !== "planned") return
+    assert.equal(result.plan.afterPruneTokens, baseline.afterPruneTokens)
+    assert.equal(calls, 0)
+    assert.deepEqual(result.plan.assistantSummaries, {})
+    assert.ok(result.plan.prefixSummary?.includes("First task, keep this requirement."))
+})
+
 test("planner triggers when either the provider total or the raw estimate crosses the trigger", () => {
     const turns = buildLargeConversation()
     const estimate = codec.estimateTurns(turns)

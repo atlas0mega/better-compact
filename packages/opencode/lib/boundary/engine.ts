@@ -13,6 +13,7 @@ import { saveSessionState, type SessionState, type WithParts } from "../state"
 import { boundaryRangeHash } from "./fingerprint"
 import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore } from "./transcripts"
+import { adaptiveTailUserTurns } from "./context"
 
 // The auto transform path: replay the session's cached plan when it still
 // holds, otherwise build, persist, and apply a fresh one. Mutates the
@@ -69,6 +70,12 @@ export async function processBoundaryTransform(input: {
         triggerTokens: input.config.compaction.triggerTokens ?? undefined,
         targetTokens: input.config.compaction.targetTokens ?? undefined,
         recentToolResultBudgetTokens: profile.recentToolTokens,
+        minTailUserTurns: adaptiveTailUserTurns(
+            input.messages,
+            input.state.modelContextLimit ?? 1,
+            profile.targetPercent,
+            input.config.compaction.targetTokens,
+        ),
         prefixSummaryAllowed: profile.prefixSummary,
         collapsePercent: profile.collapsePercent,
         providerReportedTokens: input.providerReportedTokens,

@@ -17,6 +17,7 @@ export type { EnginePorts, Logger, PlanStore, Summarizer, TranscriptStore } from
 export {
     assistantRunsStage,
     formatPrefixSummary,
+    findRawTailStartIndex,
     findBudgetTailStartIndex,
     primaryToolTarget,
     purgeErrorInputsStage,

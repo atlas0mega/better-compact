@@ -15,6 +15,7 @@ import { Logger } from "../lib/logger"
 import { createSessionState, type WithParts } from "../lib/state"
 import {
     applyBoundaryPlanSnapshot,
+    adaptiveTailUserTurns,
     buildBoundaryContextPlan,
     processBoundaryTransform,
     toBoundaryPlanSnapshot,
@@ -298,6 +299,104 @@ test("an older cached plan containing plugin prompts replans below trigger once"
         summariesAllowed: false,
     })
     assert.equal(replayed, null)
+    assert.deepEqual(repeated, messages)
+})
+
+test("sparse user turns advance the raw boundary without splitting or losing messages", async () => {
+    const messages = [
+        message("u-old", "user", [textPart("u-old", "Keep the original instruction")], 1),
+        message("a-old", "assistant", [textPart("a-old", "Earlier completed work")], 2),
+        message("u-loop", "user", [textPart("u-loop", "Start a long agent task")], 3),
+        ...Array.from({ length: 60 }, (_, index) =>
+            message(
+                `loop-${index}`,
+                "assistant",
+                [
+                    textPart(`loop-${index}`, `Step ${index}: updated source file ${index}`),
+                    {
+                        id: `reason-${index}`,
+                        sessionID,
+                        messageID: `loop-${index}`,
+                        type: "reasoning" as const,
+                        text: `investigated step ${index} ${"detail ".repeat(500)}`,
+                    },
+                ],
+                index + 4,
+            ),
+        ),
+        message("u-current", "user", [textPart("u-current", "Continue this same task")], 70),
+    ]
+    const original = structuredClone(messages)
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-agent-loop-"))
+    const config = getConfig({ directory, worktree: directory, client: {} } as never, {
+        warnings: false,
+    })
+    config.compaction.preset = "custom"
+    config.compaction.custom = {
+        ...config.compaction.custom,
+        triggerPercent: 60,
+        targetPercent: 22,
+    }
+    assert.equal(adaptiveTailUserTurns(messages, 100_000, 22), 1)
+    assert.equal(
+        adaptiveTailUserTurns(messages.slice(0, 4).concat(messages.at(-1)!), 100_000, 22),
+        2,
+    )
+    const profile = resolveCompactionProfile(config)
+    const oldPlan = buildBoundaryContextPlan(messages, {
+        contextLimit: 100_000,
+        force: true,
+        triggerRatio: 0.6,
+        targetRatio: 0.22,
+        prefixSummaryAllowed: profile.prefixSummary,
+        collapsePercent: profile.collapsePercent,
+    })
+    assert.ok(oldPlan)
+    assert.equal(oldPlan.rawTailStartMessageId, "u-loop")
+    const state = createSessionState()
+    state.sessionId = sessionID
+    state.modelContextLimit = 100_000
+    state.boundary.activePlan = toBoundaryPlanSnapshot(oldPlan, messages)
+    const logger = new Logger(false)
+    const replanned = await processBoundaryTransform({
+        state,
+        logger,
+        config,
+        directory,
+        messages,
+        summariesAllowed: false,
+    })
+    assert.ok(replanned)
+    assert.equal(replanned.rawTailStartMessageId, "u-current")
+    assert.equal(replanned.rawTailItemBoundary, undefined)
+    assert.equal(state.boundary.activePlan?.minTailUserTurns, 1)
+    assert.deepEqual(
+        replanned.transcript.messageIds,
+        original.slice(0, -1).map((item) => item.info.id),
+    )
+    assert.equal(messages.at(-1)?.parts[0]?.type, "text")
+    assert.ok(
+        replanned.prefixSummary?.includes("Start a long agent task") ||
+            messages.some(
+                (item) =>
+                    item.info.id === "u-loop" &&
+                    item.parts.some(
+                        (part) => part.type === "text" && part.text === "Start a long agent task",
+                    ),
+            ),
+    )
+    const repeated = structuredClone(original)
+    assert.equal(
+        await processBoundaryTransform({
+            state,
+            logger,
+            config,
+            directory,
+            messages: repeated,
+            summariesAllowed: false,
+        }),
+        null,
+    )
     assert.deepEqual(repeated, messages)
 })
 

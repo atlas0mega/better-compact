@@ -2,6 +2,7 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import {
     buildPlan,
+    findRawTailStartIndex,
     rangeHash,
     replayPlanSnapshot,
     toPlanSnapshot,
@@ -31,6 +32,22 @@ export type {
     BoundarySummaryJob,
     BoundaryTranscriptArtifact,
 } from "@better-compact/core"
+
+// Two real user turns normally frame the current task. In an agentic loop,
+// that span may exceed the entire target: keep the newest user turn raw and
+// move older complete turns into the citable transcript instead.
+export function adaptiveTailUserTurns(
+    messages: WithParts[],
+    contextLimit: number,
+    targetPercent: number,
+    targetTokens?: number | null,
+): 1 | 2 {
+    const turns = openCodeCodec.encode(messages)
+    const start = findRawTailStartIndex(turns, 3, 2)
+    const twoUserTail = openCodeCodec.estimateTurns(turns.slice(start))
+    const target = targetTokens ?? Math.floor((contextLimit * targetPercent) / 100)
+    return twoUserTail > target ? 1 : 2
+}
 
 export function buildBoundaryContextPlan(
     messages: WithParts[],

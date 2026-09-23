@@ -103,6 +103,7 @@ export interface BoundaryContextPlan {
     targetTokens: number
     prefixSummaryAllowed?: boolean
     collapsePercent?: number
+    minTailUserTurns?: number
     rawTailStartIndex: number
     rawTailStartMessageId: string
     rawTailItemBoundary?: RawTailItemBoundary
@@ -136,6 +137,7 @@ export interface PlanSnapshot {
     // Optional in snapshots written before profile-aware replay.
     prefixSummaryAllowed?: boolean
     collapsePercent?: number
+    minTailUserTurns?: number
     requiresCustomCompaction: boolean
     preservedToolCallIds?: string[]
     assistantSummaryKeys?: string[]
@@ -171,6 +173,7 @@ export function toPlanSnapshot(plan: BoundaryContextPlan): PlanSnapshot {
             ? { prefixSummaryAllowed: plan.prefixSummaryAllowed }
             : {}),
         ...(plan.collapsePercent !== undefined ? { collapsePercent: plan.collapsePercent } : {}),
+        ...(plan.minTailUserTurns !== undefined ? { minTailUserTurns: plan.minTailUserTurns } : {}),
         requiresCustomCompaction: plan.requiresCustomCompaction,
         preservedToolCallIds: plan.preservedToolCallIds,
         assistantSummaryKeys: plan.assistantSummaryKeys,
