@@ -157,6 +157,14 @@ export function findRecentToolCallTail(
     let used = 0
     for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex--) {
         const turn = turns[turnIndex]
+        if (turn.role === "user" && turn.prunableToolLike) {
+            const cost = Math.max(1, Math.round(codec.estimateTurns([turn])))
+            if (used >= budgetTokens) return preserved
+            if (preserved.size > 0 && used + cost > budgetTokens) return preserved
+            preserved.add(turn.key)
+            used += cost
+            continue
+        }
         if (turn.role !== "assistant") continue
         for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex--) {
             const item = turn.items[itemIndex]
@@ -281,9 +289,15 @@ export function dedupeRepeatableUserTextInSummary(
     turns: Turn[],
     conventions: Conventions,
 ): string {
-    if (!conventions.repeatableUserTextKey) return summary
-    const seen = new Set<string>()
     let result = summary
+    for (const turn of turns) {
+        if (turn.role !== "user" || !turn.prunableToolLike) continue
+        for (const item of turn.items) {
+            if (item.kind === "text") result = result.replace(`- ${item.text}\n`, "")
+        }
+    }
+    if (!conventions.repeatableUserTextKey) return result
+    const seen = new Set<string>()
     const texts = turns
         .filter((turn) => turn.role === "user" && !turn.ephemeral)
         .flatMap((turn) => turn.items)
@@ -418,6 +432,15 @@ function stripToolItems(
 
     for (let index = 0; index < ctx.rawTailStartIndex; index++) {
         const turn = working[index]
+        if (turn?.role === "user" && turn.prunableToolLike) {
+            if (preserved.has(turn.key)) continue
+            const text = `[tool:plugin-injection] Historical generated prompt pruned; full text: ${ctx.transcriptRelativePath}`
+            changedItems += turn.items.length
+            turn.items = [syntheticText(turn, text)]
+            turn.prunableToolLike = false
+            changedTurns.add(turn.key)
+            continue
+        }
         if (!turn || turn.role !== "assistant") continue
         const nextItems: Item[] = []
         let removedTools = 0

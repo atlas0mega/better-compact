@@ -781,6 +781,13 @@ function applyPreservationFloor(
     if (!prior || priorCompactedRange.length === 0) return
     const previouslyPreserved = new Set(prior.preservedToolCallIds ?? [])
     for (const turn of priorCompactedRange) {
+        if (
+            turn.prunableToolLike &&
+            preservedToolCallIds.has(turn.key) &&
+            !previouslyPreserved.has(turn.key)
+        ) {
+            preservedToolCallIds.delete(turn.key)
+        }
         for (const item of turn.items) {
             if (
                 item.kind === "tool" &&

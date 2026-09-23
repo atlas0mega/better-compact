@@ -11,6 +11,7 @@ import type { Logger } from "../logger"
 import { openCodeCodec, openCodeSpec, sessionKeyOf } from "../codec"
 import { saveSessionState, type SessionState, type WithParts } from "../state"
 import { boundaryRangeHash } from "./fingerprint"
+import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore } from "./transcripts"
 
 // The auto transform path: replay the session's cached plan when it still
@@ -49,6 +50,15 @@ export async function processBoundaryTransform(input: {
         logger: input.logger,
     }
     const profile = resolveCompactionProfile(input.config)
+    const oldPlan = input.state.boundary.activePlan
+    const oldTailIndex = oldPlan
+        ? input.messages.findIndex((message) => message.info.id === oldPlan.rawTailStartMessageId)
+        : -1
+    const migratePluginInjections =
+        !!oldPlan &&
+        oldPlan.pluginInjectionPruning !== true &&
+        oldTailIndex > 0 &&
+        input.messages.slice(0, oldTailIndex).some(isSyndicatePluginInjection)
     const engine = createEngine(openCodeSpec, ports)
     const result = await engine.process({
         sessionKey: sessionKeyOf(input.messages),
@@ -64,6 +74,7 @@ export async function processBoundaryTransform(input: {
         providerReportedTokens: input.providerReportedTokens,
         summariesAllowed: input.summariesAllowed,
         summarize: input.summariesAllowed === false ? undefined : input.summarize,
+        force: migratePluginInjections,
     })
     if (result.outcome === "unchanged") return null
     const decoded = openCodeCodec.decode(result.turns, input.messages)
@@ -73,14 +84,17 @@ export async function processBoundaryTransform(input: {
 }
 
 function stampForkIdentity(snapshot: PlanSnapshot, messages: WithParts[]) {
-    if (snapshot.rawTailItemBoundary !== undefined) return snapshot
+    const tagged = messages.some(isSyndicatePluginInjection)
+        ? { ...snapshot, pluginInjectionPruning: true as const }
+        : snapshot
+    if (snapshot.rawTailItemBoundary !== undefined) return tagged
     const tailIndex = messages.findIndex(
         (message) => message.info.id === snapshot.rawTailStartMessageId,
     )
-    if (tailIndex <= 0) return snapshot
+    if (tailIndex <= 0) return tagged
     const prefix = messages.slice(0, tailIndex)
     return {
-        ...snapshot,
+        ...tagged,
         prefixFingerprint: boundaryRangeHash(prefix),
         compactedMessageCount: prefix.length,
     }

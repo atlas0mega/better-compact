@@ -45,7 +45,12 @@ function toolPart(messageID: string, tool: string, output: string) {
     }
 }
 
-function message(id: string, role: "user" | "assistant", parts: WithParts["parts"], created: number): WithParts {
+function message(
+    id: string,
+    role: "user" | "assistant",
+    parts: WithParts["parts"],
+    created: number,
+): WithParts {
     return {
         info: {
             id,
@@ -62,7 +67,12 @@ function message(id: string, role: "user" | "assistant", parts: WithParts["parts
 test("boundary report shows visual context bars without internal threshold jargon", () => {
     const plan = buildBoundaryContextPlan(
         [
-            message("msg-user-1", "user", [textPart("msg-user-1", "Please preserve this exact requirement.")], 1),
+            message(
+                "msg-user-1",
+                "user",
+                [textPart("msg-user-1", "Please preserve this exact requirement.")],
+                1,
+            ),
             message(
                 "msg-assistant-1",
                 "assistant",
@@ -74,9 +84,24 @@ test("boundary report shows visual context bars without internal threshold jargo
                 ],
                 2,
             ),
-            message("msg-user-2", "user", [textPart("msg-user-2", "Continue with the plugin-only design.")], 3),
-            message("msg-assistant-2", "assistant", [textPart("msg-assistant-2", "Recent assistant tail should remain raw.")], 4),
-            message("msg-user-3", "user", [textPart("msg-user-3", "Latest user tail should remain raw.")], 5),
+            message(
+                "msg-user-2",
+                "user",
+                [textPart("msg-user-2", "Continue with the plugin-only design.")],
+                3,
+            ),
+            message(
+                "msg-assistant-2",
+                "assistant",
+                [textPart("msg-assistant-2", "Recent assistant tail should remain raw.")],
+                4,
+            ),
+            message(
+                "msg-user-3",
+                "user",
+                [textPart("msg-user-3", "Latest user tail should remain raw.")],
+                5,
+            ),
         ],
         {
             contextLimit: 20_000,
@@ -98,4 +123,36 @@ test("boundary report shows visual context bars without internal threshold jargo
     assert.doesNotMatch(report, /Projected after/i)
     assert.doesNotMatch(report, /Trigger threshold/i)
     assert.doesNotMatch(report, /Last-resort target/i)
+})
+
+test("an applied summary stage with no net savings is not reported as unused", () => {
+    const plan = buildBoundaryContextPlan(
+        [
+            message("u-1", "user", [textPart("u-1", "Old task")], 1),
+            message("a-1", "assistant", [textPart("a-1", "Old reply ".repeat(1_000))], 2),
+            message("u-2", "user", [textPart("u-2", "Second task")], 3),
+            message("a-2", "assistant", [textPart("a-2", "Second reply")], 4),
+            message("u-3", "user", [textPart("u-3", "Current task")], 5),
+        ],
+        { contextLimit: 40_000, force: true },
+    )
+    assert.ok(plan)
+    const report = formatBoundaryReport({
+        ...plan,
+        stages: [
+            ...plan.stages,
+            {
+                name: "assistant-runs",
+                label: "Summarized assistant turns",
+                status: "applied",
+                clearedTokens: 0,
+                changedMessages: 1,
+                changedParts: 1,
+                beforeTokens: 165_156,
+                afterTokens: 165_156,
+            },
+        ],
+    })
+    assert.match(report, /Summarized assistant turns\s+applied \(no net savings\)/)
+    assert.doesNotMatch(report, /Summarized assistant turns\s+not needed/)
 })

@@ -24,6 +24,10 @@ export interface Turn {
     // report messages): they carry no user intent, so they neither count as
     // protected user turns for tail selection nor feed prefix summaries.
     ephemeral?: boolean
+    // Adapter-identified generated user input (e.g. a plugin-injected prompt).
+    // It remains a native user message but follows tool-output retention and
+    // stubbing rules in the virtual context, never the human instruction path.
+    prunableToolLike?: boolean
     // Core-only identity for a virtual item-boundary fragment. Native codecs
     // never receive fragmented turns; the marker only scopes replay hashes
     // and assistant-summary keys while stages operate on the fragment.
