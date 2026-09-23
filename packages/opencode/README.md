@@ -165,7 +165,7 @@ prefix for prompt caching; the target remains best-effort.
 The first last-resort prefix also needs synthesis: simply listing hundreds of
 assistant-turn previews can itself exceed the target. Better Compact splits that
 chronological progress into at most five complete, bounded input chunks (about
-22k estimated input tokens each), summarizes them concurrently on the configured
+23k estimated input tokens each), summarizes them concurrently on the configured
 summary model, and assembles the six task-state sections in original order.
 Each chunk retains its transcript reference; original user instructions are
 inserted verbatim from the source turns, never rewritten by the summarizer.

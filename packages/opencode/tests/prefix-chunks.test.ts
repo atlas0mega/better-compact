@@ -74,19 +74,19 @@ function checkpoint(index: number): string {
 }
 
 test("a long deterministic prefix is covered by five bounded chronological jobs", () => {
-    const { plan, turns } = history(704)
+    const { plan, turns } = history(720)
     const jobs = buildPrefixChunks(plan)
     assert.equal(jobs.length, 5)
     assert.equal(
         jobs.reduce((sum, chunk) => sum + chunk.count, 0),
-        704,
+        720,
     )
     for (const chunk of jobs) {
         assert.ok(countTokens(chunk.job.prompt) + 80 <= 24_000)
         assert.match(chunk.job.prompt, /transcripts\/raw\.md/)
     }
     assert.match(jobs[0].job.prompt, /feature-0\.ts/)
-    assert.match(jobs.at(-1)!.job.prompt, /feature-703\.ts/)
+    assert.match(jobs.at(-1)!.job.prompt, /feature-719\.ts/)
     const results = Object.fromEntries(jobs.map((job, index) => [job.job.key, checkpoint(index)]))
     const assembled = assemblePrefixChunks(jobs, results, turns, plan.rawTailStartIndex)
     assert.ok(assembled)

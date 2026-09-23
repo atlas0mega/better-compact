@@ -10,7 +10,7 @@ import {
 import { openCodeConventions } from "../codec"
 
 const MAX_CHUNKS = 5
-const MAX_CHUNK_TOKENS = 22_000
+const MAX_CHUNK_TOKENS = 23_000
 const PROGRESS_MARKER = "- Resume from prior assistant progress: "
 
 export interface PrefixChunk {
