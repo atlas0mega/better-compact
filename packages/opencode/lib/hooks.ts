@@ -186,6 +186,7 @@ async function runAutomaticTransform(input: {
                         jobs,
                         params: input.params,
                         summaryEffort: input.config.compaction.summaryEffort,
+                        summaryModel: input.config.compaction.summaryModel,
                         concurrency: resolveCompactionProfile(input.config).summarizerConcurrency,
                     }),
             })
@@ -677,7 +678,7 @@ async function runBetterCompact(input: {
                 input.state,
                 summaryStage,
                 "running",
-                `${plan.summaryJobs.length} summary jobs queued`,
+                `${plan.summaryJobs.length} turns selected for up to 5 grouped calls`,
             )
             updateBoundaryCounters(input.state, {
                 summaryJobsTotal: plan.summaryJobs.length,
@@ -688,13 +689,19 @@ async function runBetterCompact(input: {
             })
             appendBoundaryLog(
                 input.state,
-                `Running ${plan.summaryJobs.length} summary jobs in parallel.`,
+                `Distributing ${plan.summaryJobs.length} selected turns across up to 5 concurrent scratch calls.`,
             )
             await saveProgress()
             const assistantSummaries = await summarizeBoundaryJobs({
-                summaryEffort: input.summaryVariant
-                    ? "inherit"
-                    : (input.compaction?.summaryEffort ?? effectiveConfig.compaction.summaryEffort),
+                summaryEffort:
+                    input.summaryVariant &&
+                    (!effectiveConfig.compaction.summaryModel ||
+                        effectiveConfig.compaction.summaryModel ===
+                            `${params.providerId}/${params.modelId}`)
+                        ? "inherit"
+                        : (input.compaction?.summaryEffort ??
+                          effectiveConfig.compaction.summaryEffort),
+                summaryModel: effectiveConfig.compaction.summaryModel,
                 client: input.client,
                 runtime: input.runtime,
                 logger: input.logger,
@@ -743,7 +750,7 @@ async function runBetterCompact(input: {
                 input.state,
                 summaryStage,
                 "completed",
-                `${Object.keys(assistantSummaries).length}/${plan.summaryJobs.length} summaries accepted`,
+                `${Object.keys(assistantSummaries).length}/${plan.summaryJobs.length} summaries accepted (${input.state.boundary.job?.counters.summaryJobsDone ?? 0} attempted; remaining turns use deterministic fallback)`,
             )
             updateBoundaryCounters(input.state, {
                 currentTokens: finalPlan.afterPruneTokens,

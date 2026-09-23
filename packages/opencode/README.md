@@ -23,18 +23,18 @@ their inherited values. IDs are exact OpenCode provider/model IDs, not wildcards
 
 ```jsonc
 {
-  "compaction": {
-    "preset": "custom",
-    "custom": { "triggerPercent": 85, "targetPercent": 35 },
-    "providers": {
-      "runpod": {
-        "custom": { "summarizerConcurrency": 3 },
-        "models": {
-          "qwen3.8-27b-ud-q6-k-m": { "triggerTokens": 181000 }
-        }
-      }
-    }
-  }
+    "compaction": {
+        "preset": "custom",
+        "custom": { "triggerPercent": 85, "targetPercent": 35 },
+        "providers": {
+            "runpod": {
+                "custom": { "summarizerConcurrency": 3 },
+                "models": {
+                    "qwen3.8-27b-ud-q6-k-m": { "triggerTokens": 181000 },
+                },
+            },
+        },
+    },
 }
 ```
 
@@ -125,6 +125,32 @@ Project settings override global settings.
 | `max`      |     60% |    15% |         12k tokens |
 
 Changes made in `/better-compact-settings` apply to later runs without restarting OpenCode.
+
+To run scratch summaries on another model without changing the conversation model or its
+compaction thresholds, set `compaction.summaryModel` to a `provider/model-id` string:
+
+```jsonc
+{
+    "compaction": {
+        "summaryModel": "openai/gpt-6-luna",
+        "summaryEffort": "high",
+    },
+}
+```
+
+The setting inherits through provider/model compaction overrides. Set a scoped `summaryModel`
+to `null` to use the active chat model for that scope. When switching models,
+`summaryEffort: "inherit"` uses the summary model's default variant rather than carrying
+over the conversation model's variant.
+
+For OpenCode scratch summaries, selected assistant turns are spread across up to five
+model calls per compaction. The call count scales with estimated input size; each call
+targets 12k input tokens and is capped at approximately 24k and 16 turns. Jobs beyond
+that budget keep the deterministic summary and transcript reference. The calls can run
+in parallel up to `compaction.custom.summarizerConcurrency`. Responses contain one
+validated summary per turn, with a batch-wide output target that grows sublinearly
+with the turn count. Three failed calls in a row pause further summary calls for five
+minutes; that failure cooldown is separate from the per-compaction five-call limit.
 
 ## Upgrade
 

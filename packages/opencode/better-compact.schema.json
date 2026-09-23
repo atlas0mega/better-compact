@@ -62,6 +62,11 @@
                     "default": "inherit",
                     "description": "Reasoning effort for scratch summaries. Unsupported effort levels fall back to the model default."
                 },
+                "summaryModel": {
+                    "type": ["string", "null"],
+                    "pattern": "^[^/\\s]+/[^/\\s][^\\s]*$",
+                    "description": "Provider/model ID for scratch summaries only. Omit to use the active chat model; null clears an inherited override."
+                },
                 "custom": {
                     "type": "object",
                     "additionalProperties": false,
@@ -143,6 +148,11 @@
                                 "enum": ["inherit", "low", "medium", "high", "max", "off"],
                                 "default": "inherit",
                                 "description": "Reasoning effort for scratch summaries. Unsupported effort levels fall back to the model default."
+                            },
+                            "summaryModel": {
+                                "type": ["string", "null"],
+                                "pattern": "^[^/\\s]+/[^/\\s][^\\s]*$",
+                                "description": "Provider/model ID for scratch summaries only. null restores the active chat model."
                             },
                             "custom": {
                                 "type": "object",
@@ -279,6 +289,11 @@
                     "enum": ["inherit", "low", "medium", "high", "max", "off"],
                     "default": "inherit",
                     "description": "Reasoning effort for scratch summaries. Unsupported effort levels fall back to the model default."
+                },
+                "summaryModel": {
+                    "type": ["string", "null"],
+                    "pattern": "^[^/\\s]+/[^/\\s][^\\s]*$",
+                    "description": "Provider/model ID for scratch summaries only. null restores the active chat model."
                 },
                 "custom": {
                     "type": "object",

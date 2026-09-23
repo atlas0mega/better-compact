@@ -461,6 +461,93 @@ test("manual compaction honors the prefix-summary opt-in and assistant collapse 
     assert.equal(plans[2].assistantSummaryKeys?.length, 1)
 })
 
+test("manual TUI compaction routes scratch summaries to the configured model effort", async () => {
+    const sessionId = `ses-summary-model-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionId)
+    const summary = [
+        "## Decisions",
+        "- Completed the requested work.",
+        "## Files & Symbols",
+        "- src/app.ts",
+        "## Errors (verbatim)",
+        "- (none)",
+        "## What failed and why",
+        "- (none)",
+        "## Constraints",
+        "- Preserve the contract.",
+        "## Next step",
+        "- Continue implementation.",
+    ].join("\n")
+    const scratchPrompts: any[] = []
+    const client = {
+        provider: {
+            list: async () => ({
+                data: {
+                    all: [{ id: "openai", models: { "gpt-6-luna": { variants: { high: {} } } } }],
+                },
+            }),
+        },
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+            create: async ({ body }: any) => {
+                assert.deepEqual(body.model, { providerID: "openai", id: "gpt-6-luna" })
+                return { data: { id: `scratch-${sessionId}` } }
+            },
+            prompt: async (input: any) => {
+                if (input.body.noReply) return { data: true }
+                scratchPrompts.push(input)
+                return { data: { parts: [{ type: "text", text: summary }] } }
+            },
+            delete: async () => ({ data: true }),
+        },
+    }
+    const config = profileEscalationConfig(false, 10)
+    config.compaction.summaryEffort = "high"
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    const runtime = createRuntimeState(client, new Logger(false))
+    const state = runtime.get(sessionId)
+    state.modelContextLimit = 50_000
+    const handler = createChatMessageHandler(
+        client as any,
+        runtime,
+        new Logger(false),
+        config,
+        mkdtempSync(join(tmpdir(), "better-compact-summary-model-")),
+        { global: undefined, agents: {} },
+    )
+    await handler(
+        {
+            sessionID: sessionId,
+            model: { providerID: "anthropic", modelID: "claude-test" },
+            variant: "low",
+        },
+        {
+            message: { agent: "assistant" },
+            parts: [
+                {
+                    type: "text",
+                    ignored: true,
+                    metadata: {
+                        betterCompact: "run",
+                        summaryVariant: "low",
+                        summaryProviderID: "anthropic",
+                        summaryModelID: "claude-test",
+                        contextLimit: 50_000,
+                    },
+                },
+            ],
+        },
+    )
+    await waitFor(() => state.boundary.job?.status === "completed")
+    assert.ok(scratchPrompts.length > 0)
+    for (const prompt of scratchPrompts) {
+        assert.deepEqual(prompt.body.model, { providerID: "openai", modelID: "gpt-6-luna" })
+        assert.equal(prompt.body.variant, "high")
+    }
+    assert.ok((state.boundary.job?.counters.summaryJobsSucceeded ?? 0) > 0)
+})
+
 test("auto transform path never prunes when compress permission is deny", async () => {
     const sessionId = `ses-transform-deny-${Date.now()}`
     const messages = buildOverTriggerConversation(sessionId)
