@@ -5,6 +5,7 @@ import {
     buildPlan,
     countTokens,
     createEngine,
+    createSummaryScheduler,
     reasoningStage,
     replayPlanSnapshot,
     purgeErrorInputsStage,
@@ -482,6 +483,115 @@ test("applied output matches the simulated plan when assistant runs are summariz
     )
 
     assert.ok(transformed.some((item) => item.key === "msg-assistant-tail"))
+})
+
+test("separate grouped calls rebuild and replay summaries in original turn order", async () => {
+    const turns = [
+        turn("msg-user-1", "user", [textItem("msg-user-1", "First request")], 1),
+        turn(
+            "msg-assistant-1",
+            "assistant",
+            [textItem("msg-assistant-1", "old first ".repeat(3_000))],
+            2,
+        ),
+        turn("msg-user-2", "user", [textItem("msg-user-2", "Second request")], 3),
+        turn(
+            "msg-assistant-2",
+            "assistant",
+            [textItem("msg-assistant-2", "old second ".repeat(3_000))],
+            4,
+        ),
+        turn("msg-user-3", "user", [textItem("msg-user-3", "Third request")], 5),
+        turn(
+            "msg-assistant-3",
+            "assistant",
+            [textItem("msg-assistant-3", "old third ".repeat(3_000))],
+            6,
+        ),
+        turn("msg-user-4", "user", [textItem("msg-user-4", "Last request")], 7),
+        turn("msg-assistant-4", "assistant", [textItem("msg-assistant-4", "recent reply")], 8),
+        turn("msg-user-5", "user", [textItem("msg-user-5", "Latest request")], 9),
+    ]
+    const original = JSON.stringify(turns)
+    const options = inputs({
+        contextLimit: 50_000,
+        targetRatio: 0.01,
+        force: true,
+        recentToolResultBudgetTokens: 0,
+    })
+    const initial = buildPlan(turns, options, spec)
+    assert.ok(initial)
+    assert.ok(initial.summaryJobs.length >= 3)
+
+    const calls: string[][] = []
+    const scheduler = createSummaryScheduler({ info() {}, debug() {}, warn() {}, error() {} })
+    const summaries = await scheduler.summarize({
+        sessionKey,
+        jobs: initial.summaryJobs,
+        concurrency: 2,
+        maxCalls: 2,
+        targetBatchTokens: 1,
+        maxJobsPerBatch: 2,
+        summarizer: {
+            complete: async () => {
+                throw new Error("Must use grouped transport")
+            },
+            completeBatch: async (batch) => {
+                calls.push(batch.map((job) => job.key))
+                return Object.fromEntries(
+                    batch
+                        .filter((job) => job.rangeStartMessageId !== "msg-assistant-2")
+                        .map((job) => [
+                            job.key,
+                            [
+                                "## Decisions",
+                                `- Accepted ${job.rangeStartMessageId} and kept its decisions.`,
+                                "## Files & Symbols",
+                                "- src/feature.ts",
+                                "## Errors (verbatim)",
+                                "- (none)",
+                                "## What failed and why",
+                                "- (none)",
+                                "## Constraints",
+                                "- Preserve the user request.",
+                                "## Next step",
+                                "- Continue the work.",
+                            ].join("\n"),
+                        ]),
+                )
+            },
+        },
+    })
+    assert.equal(calls.length, 2)
+    assert.ok(calls.some((batch) => batch.length === 2))
+    assert.equal(Object.keys(summaries).length, 2)
+    const rebuilt = buildPlan(
+        turns,
+        { ...options, assistantSummaries: summaries, priorPlan: toPlanSnapshot(initial) },
+        spec,
+    )
+    assert.ok(rebuilt)
+    const transformed = transformTurns(turns, rebuilt.rawTailStartIndex, rebuilt, spec)
+    const replay = replayPlanSnapshot(turns, toPlanSnapshot(rebuilt), spec, { allowRegrown: true })
+    assert.ok(replay)
+    assert.equal(JSON.stringify(replay), JSON.stringify(transformed))
+
+    for (const accepted of initial.summaryJobs.filter((job) => summaries[job.key])) {
+        const position = transformed.findIndex((item) => item.key === accepted.rangeStartMessageId)
+        assert.ok(position >= 0)
+        const content = syntheticTextOf(transformed[position])
+        assert.match(content, new RegExp(`Accepted ${accepted.rangeStartMessageId}`))
+        for (const other of initial.summaryJobs.filter(
+            (job) => job.key !== accepted.key && summaries[job.key],
+        )) {
+            assert.doesNotMatch(content, new RegExp(`Accepted ${other.rangeStartMessageId}`))
+        }
+    }
+    const skipped = initial.summaryJobs.find((job) => !summaries[job.key])
+    assert.ok(skipped)
+    const fallback = transformed.find((item) => item.key === skipped.rangeStartMessageId)
+    assert.match(syntheticTextOf(fallback), /old (first|second|third)/)
+    assert.equal(JSON.stringify(turns), original)
 })
 
 test("prefix summary fires when pruning cannot get the applied output below trigger", () => {
