@@ -269,6 +269,12 @@ export function buildPlan(
         overheadTokens,
         triggerTokens,
         targetTokens,
+        ...(inputs.prefixSummaryAllowed !== undefined
+            ? { prefixSummaryAllowed: inputs.prefixSummaryAllowed }
+            : {}),
+        ...(inputs.collapsePercent !== undefined
+            ? { collapsePercent: inputs.collapsePercent }
+            : {}),
         rawTailStartIndex,
         rawTailStartMessageId: turns[boundary.turnIndex]?.key ?? turns.at(-1)?.key ?? "",
         rawTailItemBoundary: recordedItemBoundary(turns, boundary),
@@ -504,7 +510,9 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                             Math.floor((contextLimit ?? 0) * (triggerRatio ?? TRIGGER_RATIO))) &&
                     cached.targetTokens ===
                         (targetTokens ??
-                            Math.floor((contextLimit ?? 0) * (targetRatio ?? TARGET_RATIO)))
+                            Math.floor((contextLimit ?? 0) * (targetRatio ?? TARGET_RATIO))) &&
+                    cached.prefixSummaryAllowed === prefixSummaryAllowed &&
+                    cached.collapsePercent === collapsePercent
                 const replayed =
                     force || !budgetsMatch
                         ? null

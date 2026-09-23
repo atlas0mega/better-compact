@@ -59,6 +59,8 @@ export async function processBoundaryTransform(input: {
         triggerTokens: input.config.compaction.triggerTokens ?? undefined,
         targetTokens: input.config.compaction.targetTokens ?? undefined,
         recentToolResultBudgetTokens: profile.recentToolTokens,
+        prefixSummaryAllowed: profile.prefixSummary,
+        collapsePercent: profile.collapsePercent,
         providerReportedTokens: input.providerReportedTokens,
         summariesAllowed: input.summariesAllowed,
         summarize: input.summariesAllowed === false ? undefined : input.summarize,

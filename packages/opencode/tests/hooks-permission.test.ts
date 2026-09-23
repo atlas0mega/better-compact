@@ -240,6 +240,46 @@ function buildOverTriggerConversation(sessionId: string): WithParts[] {
     ]
 }
 
+function buildProfileEscalationConversation(sessionId: string): WithParts[] {
+    const messages = [
+        buildUserMessage("profile-old-user", "Important instruction ".repeat(2_000), 1, sessionId),
+    ]
+    for (let index = 0; index < 8; index++) {
+        const assistant = buildMessage(
+            `profile-assistant-${index}`,
+            "assistant",
+            `progress ${index} ${"x".repeat(4_000)}`,
+        )
+        assistant.info.sessionID = sessionId
+        for (const part of assistant.parts) part.sessionID = sessionId
+        messages.push(assistant)
+    }
+    messages.push(buildUserMessage("profile-middle-user", "middle request", 20, sessionId))
+    const tail = buildMessage("profile-tail", "assistant", "recent response")
+    tail.info.sessionID = sessionId
+    for (const part of tail.parts) part.sessionID = sessionId
+    messages.push(tail, buildUserMessage("profile-latest-user", "current request", 22, sessionId))
+    return messages
+}
+
+function profileEscalationConfig(prefixSummary: boolean, collapsePercent: number): PluginConfig {
+    const config = buildConfig("allow")
+    config.compaction = {
+        automatic: true,
+        preset: "custom",
+        summaryEffort: "off",
+        custom: {
+            triggerPercent: 1,
+            targetPercent: 1,
+            recentToolTokens: 0,
+            summarizerConcurrency: 1,
+            prefixSummary,
+            collapsePercent,
+        },
+    }
+    return config
+}
+
 function transformClient(contextLimit: number, toasts: unknown[] = []) {
     return {
         session: { get: async () => ({ data: { parentID: null } }) },
@@ -351,6 +391,74 @@ test("auto transform path honors the configured compaction profile", async () =>
         null,
         "default 85% trigger must not fire at ~8% usage",
     )
+})
+
+test("automatic compaction honors the prefix-summary opt-in and assistant collapse cap", async () => {
+    const plans = [] as NonNullable<ReturnType<RuntimeState["get"]>["boundary"]["activePlan"]>[]
+    for (const [prefixSummary, collapsePercent] of [
+        [false, 10],
+        [false, 75],
+        [true, 10],
+    ] as const) {
+        const sessionId = `ses-auto-profile-${prefixSummary}-${collapsePercent}-${Date.now()}`
+        const messages = buildProfileEscalationConversation(sessionId)
+        const client = transformClient(50_000)
+        const runtime = createRuntimeState(client, new Logger(false))
+        await transformHandler(
+            client,
+            runtime,
+            profileEscalationConfig(prefixSummary, collapsePercent),
+            mkdtempSync(join(tmpdir(), "better-compact-profile-auto-")),
+        )({}, { messages })
+        const plan = runtime.get(sessionId).boundary.activePlan
+        assert.ok(plan)
+        plans.push(plan)
+    }
+
+    assert.ok(!plans[0].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[0].assistantSummaryKeys?.length, 1)
+    assert.ok((plans[1].assistantSummaryKeys?.length ?? 0) > 1)
+    assert.ok(plans[2].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[2].assistantSummaryKeys?.length, 1)
+})
+
+test("manual compaction honors the prefix-summary opt-in and assistant collapse cap", async () => {
+    const plans = [] as NonNullable<ReturnType<RuntimeState["get"]>["boundary"]["activePlan"]>[]
+    for (const [prefixSummary, collapsePercent] of [
+        [false, 10],
+        [false, 75],
+        [true, 10],
+    ] as const) {
+        const sessionId = `ses-manual-profile-${prefixSummary}-${collapsePercent}-${Date.now()}`
+        const messages = buildProfileEscalationConversation(sessionId)
+        const client = {
+            session: {
+                get: async () => ({ data: { parentID: null } }),
+                messages: async () => ({ data: messages }),
+                prompt: async () => ({ data: true }),
+            },
+        }
+        const runtime = createRuntimeState(client, new Logger(false))
+        const state = runtime.get(sessionId)
+        state.modelContextLimit = 50_000
+        await createCommandExecuteHandler(
+            client as any,
+            runtime,
+            new Logger(false),
+            profileEscalationConfig(prefixSummary, collapsePercent),
+            mkdtempSync(join(tmpdir(), "better-compact-profile-manual-")),
+            { global: undefined, agents: {} },
+        )({ command: "better-compact", sessionID: sessionId, arguments: "" }, { parts: [] })
+        await waitFor(() => state.boundary.job?.status === "completed")
+        assert.ok(state.boundary.activePlan)
+        plans.push(state.boundary.activePlan)
+    }
+
+    assert.ok(!plans[0].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[0].assistantSummaryKeys?.length, 1)
+    assert.ok((plans[1].assistantSummaryKeys?.length ?? 0) > 1)
+    assert.ok(plans[2].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[2].assistantSummaryKeys?.length, 1)
 })
 
 test("auto transform path never prunes when compress permission is deny", async () => {
@@ -968,6 +1076,8 @@ async function persistForkSourcePlan(directory: string, prefix: WithParts[]): Pr
         overheadTokens: 0,
         triggerTokens: 85_000,
         targetTokens: 35_000,
+        prefixSummaryAllowed: false,
+        collapsePercent: 25,
         requiresCustomCompaction: false,
         stages: [],
         createdAt: 1,

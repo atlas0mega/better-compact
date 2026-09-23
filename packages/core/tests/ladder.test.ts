@@ -1249,6 +1249,53 @@ test("engine does not replay thresholds cached for another model", async () => {
     assert.equal(saved, null)
 })
 
+test("engine rebuilds a cached plan when prefix-summary or collapse settings change", async () => {
+    const turns = buildMultiRunConversation()
+    const original = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 40_000,
+            recentToolResultBudgetTokens: 0,
+            prefixSummaryAllowed: true,
+            collapsePercent: 10,
+        }),
+        spec,
+    )
+    assert.ok(original)
+    let snapshot = toPlanSnapshot(original)
+    const engine = createEngine(spec, {
+        transcripts: {
+            citablePath: (key, hash) => `transcripts/${key}/${hash}.md`,
+            write: async () => ({}),
+        },
+        plans: {
+            load: () => snapshot,
+            save: (_key, value) => {
+                if (value) snapshot = value
+            },
+        },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    })
+    const request = {
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        collapsePercent: 10,
+    }
+    assert.equal((await engine.process(request)).outcome, "replayed")
+
+    assert.equal((await engine.process({ ...request, collapsePercent: 75 })).outcome, "planned")
+    assert.equal(snapshot.collapsePercent, 75)
+    assert.equal(
+        (await engine.process({ ...request, collapsePercent: 75, prefixSummaryAllowed: false }))
+            .outcome,
+        "planned",
+    )
+    assert.equal(snapshot.prefixSummaryAllowed, false)
+})
+
 test("engine keeps the deterministic plan when summary scheduling rejects", async () => {
     const turns = buildMultiRunConversation()
     const planInputs = inputs({ contextLimit: 40_000, recentToolResultBudgetTokens: 0 })
