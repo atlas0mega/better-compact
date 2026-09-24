@@ -5689,7 +5689,7 @@
       "rangeHash": "7e93129c2ddaba39",
       "contextLimit": 500,
       "beforeTokens": 11702,
-      "afterPruneTokens": 9335,
+      "afterPruneTokens": 9307,
       "overheadTokens": 0,
       "triggerTokens": 425,
       "targetTokens": 150,
@@ -5783,18 +5783,18 @@
           "name": "assistant-runs",
           "label": "Summarized assistant turns",
           "beforeTokens": 9097,
-          "afterTokens": 9126,
+          "afterTokens": 9097,
           "clearedTokens": 0,
-          "changedMessages": 1,
+          "changedMessages": 0,
           "changedParts": 0,
-          "status": "applied"
+          "status": "skipped"
         },
         {
           "name": "prefix-summary",
           "label": "Last-resort prefix summary",
-          "beforeTokens": 9338,
-          "afterTokens": 9335,
-          "clearedTokens": 3,
+          "beforeTokens": 9309,
+          "afterTokens": 9307,
+          "clearedTokens": 2,
           "changedMessages": 5,
           "changedParts": 7,
           "status": "failed"
@@ -5803,12 +5803,12 @@
       "summaryJobs": [],
       "assistantSummaryKeys": [],
       "assistantSummaries": {},
-      "prefixSummary": "## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [Assistant turn summary] [tool:bash] npm test — ok Raw transcript: .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok",
+      "prefixSummary": "## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [tool:bash] npm test — ok\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok",
       "residual": {
         "rawTailTokens": 19,
         "protectedPartTokens": 0,
-        "handoffTokens": 322,
-        "otherTokens": 8994,
+        "handoffTokens": 293,
+        "otherTokens": 8995,
         "overheadTokens": 0
       }
     },
@@ -5834,7 +5834,7 @@
             "sessionID": "ses_golden_boundary",
             "type": "text",
             "synthetic": true,
-            "text": "[Context Summary]\n## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [Assistant turn summary] [tool:bash] npm test — ok Raw transcript: .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok\n\n## Reference Files\n- \".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\""
+            "text": "[Context Summary]\n## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [tool:bash] npm test — ok\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok\n\n## Reference Files\n- \".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\""
           }
         ]
       },
@@ -5953,7 +5953,7 @@
         ]
       }
     ],
-    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before   11.7K / 500     [██████████████████] 2340%\n  Now       9.3K / 500     [██████████████████] 1867% projected\n\n  Reduced 2.4K (20%)\n  Target 150; 9.2K still above target\n  Largest retained components: other retained content ~9K, handoff/reference and archive catalog ~322, recent raw tail ~19\n  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most 0. Exact history remains in the private archive.\n\n  Actions\n  ✓ Pruned old tool calls/results          -1.6K\n  ✓ Pruned thinking tokens                 -1K\n  ✓ Summarized assistant turns             increased +29\n  ✓ Last-resort prefix summary             -3\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n  5 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
+    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before   11.7K / 500     [██████████████████] 2340%\n  Now       9.3K / 500     [██████████████████] 1861% projected\n\n  Reduced 2.4K (20%)\n  Target 150; 9.2K still above target\n  Largest retained components: other retained content ~9K, handoff/reference and archive catalog ~293, recent raw tail ~19\n  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most 0. Exact history remains in the private archive.\n\n  Actions\n  ✓ Pruned old tool calls/results          -1.6K\n  ✓ Pruned thinking tokens                 -1K\n  ✓ Last-resort prefix summary             -2\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n  5 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
     "snapshot": {
       "sessionId": "ses_golden_boundary",
       "rangeHash": "7e93129c2ddaba39",
@@ -5961,12 +5961,12 @@
       "rawTailStartMessageId": "msg-user-3",
       "transcriptRelativePath": ".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md",
       "beforeTokens": 11702,
-      "afterPruneTokens": 9335,
+      "afterPruneTokens": 9307,
       "residual": {
         "rawTailTokens": 19,
         "protectedPartTokens": 0,
-        "handoffTokens": 322,
-        "otherTokens": 8994,
+        "handoffTokens": 293,
+        "otherTokens": 8995,
         "overheadTokens": 0
       },
       "overheadTokens": 0,
@@ -5986,7 +5986,7 @@
       "reasoningSurvivesPrefix": false,
       "assistantSummaryKeys": [],
       "assistantSummaries": {},
-      "prefixSummary": "## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [Assistant turn summary] [tool:bash] npm test — ok Raw transcript: .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok",
+      "prefixSummary": "## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [tool:bash] npm test — ok\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok",
       "stages": [
         {
           "name": "skills",
@@ -6052,18 +6052,18 @@
           "name": "assistant-runs",
           "label": "Summarized assistant turns",
           "beforeTokens": 9097,
-          "afterTokens": 9126,
+          "afterTokens": 9097,
           "clearedTokens": 0,
-          "changedMessages": 1,
+          "changedMessages": 0,
           "changedParts": 0,
-          "status": "applied"
+          "status": "skipped"
         },
         {
           "name": "prefix-summary",
           "label": "Last-resort prefix summary",
-          "beforeTokens": 9338,
-          "afterTokens": 9335,
-          "clearedTokens": 3,
+          "beforeTokens": 9309,
+          "afterTokens": 9307,
+          "clearedTokens": 2,
           "changedMessages": 5,
           "changedParts": 7,
           "status": "failed"
@@ -6708,18 +6708,18 @@
           "name": "assistant-runs",
           "label": "Summarized assistant turns",
           "beforeTokens": 9097,
-          "afterTokens": 9126,
+          "afterTokens": 9097,
           "clearedTokens": 0,
-          "changedMessages": 1,
+          "changedMessages": 0,
           "changedParts": 0,
-          "status": "applied"
+          "status": "skipped"
         },
         {
           "name": "prefix-summary",
           "label": "Last-resort prefix summary",
-          "beforeTokens": 9338,
+          "beforeTokens": 9309,
           "afterTokens": 9073,
-          "clearedTokens": 265,
+          "clearedTokens": 236,
           "changedMessages": 5,
           "changedParts": 7,
           "status": "failed"
@@ -6878,7 +6878,7 @@
         ]
       }
     ],
-    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before   11.7K / 500     [██████████████████] 2340%\n  Now       9.1K / 500     [██████████████████] 1815% projected\n\n  Reduced 2.6K (22%)\n  Target 150; 8.9K still above target\n  Largest retained components: other retained content ~9K, handoff/reference and archive catalog ~59, recent raw tail ~19\n  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most 0. Exact history remains in the private archive.\n\n  Actions\n  ✓ Pruned old tool calls/results          -1.6K\n  ✓ Pruned thinking tokens                 -1K\n  ✓ Summarized assistant turns             increased +29\n  ✓ Last-resort prefix summary             -265\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n  5 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
+    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before   11.7K / 500     [██████████████████] 2340%\n  Now       9.1K / 500     [██████████████████] 1815% projected\n\n  Reduced 2.6K (22%)\n  Target 150; 8.9K still above target\n  Largest retained components: other retained content ~9K, handoff/reference and archive catalog ~59, recent raw tail ~19\n  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most 0. Exact history remains in the private archive.\n\n  Actions\n  ✓ Pruned old tool calls/results          -1.6K\n  ✓ Pruned thinking tokens                 -1K\n  ✓ Last-resort prefix summary             -236\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n  5 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
     "snapshot": {
       "sessionId": "ses_golden_boundary",
       "rangeHash": "7e93129c2ddaba39",
@@ -6977,18 +6977,18 @@
           "name": "assistant-runs",
           "label": "Summarized assistant turns",
           "beforeTokens": 9097,
-          "afterTokens": 9126,
+          "afterTokens": 9097,
           "clearedTokens": 0,
-          "changedMessages": 1,
+          "changedMessages": 0,
           "changedParts": 0,
-          "status": "applied"
+          "status": "skipped"
         },
         {
           "name": "prefix-summary",
           "label": "Last-resort prefix summary",
-          "beforeTokens": 9338,
+          "beforeTokens": 9309,
           "afterTokens": 9073,
-          "clearedTokens": 265,
+          "clearedTokens": 236,
           "changedMessages": 5,
           "changedParts": 7,
           "status": "failed"
@@ -7540,7 +7540,7 @@
       "rangeHash": "7e93129c2ddaba39",
       "contextLimit": 120000,
       "beforeTokens": 60000,
-      "afterPruneTokens": 57633,
+      "afterPruneTokens": 57605,
       "overheadTokens": 48298,
       "triggerTokens": 102000,
       "targetTokens": 36000,
@@ -7633,18 +7633,18 @@
           "name": "assistant-runs",
           "label": "Summarized assistant turns",
           "beforeTokens": 58430,
-          "afterTokens": 58459,
+          "afterTokens": 58430,
           "clearedTokens": 0,
-          "changedMessages": 1,
+          "changedMessages": 0,
           "changedParts": 0,
-          "status": "applied"
+          "status": "skipped"
         },
         {
           "name": "prefix-summary",
           "label": "Last-resort prefix summary",
-          "beforeTokens": 58671,
-          "afterTokens": 58668,
-          "clearedTokens": 3,
+          "beforeTokens": 58642,
+          "afterTokens": 58640,
+          "clearedTokens": 2,
           "changedMessages": 5,
           "changedParts": 9,
           "status": "failed"
@@ -7653,12 +7653,12 @@
       "summaryJobs": [],
       "assistantSummaryKeys": [],
       "assistantSummaries": {},
-      "prefixSummary": "## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [Assistant turn summary] [tool:bash] npm test — ok Raw transcript: .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok",
+      "prefixSummary": "## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [tool:bash] npm test — ok\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok",
       "residual": {
         "rawTailTokens": 19,
         "protectedPartTokens": 0,
-        "handoffTokens": 322,
-        "otherTokens": 8994,
+        "handoffTokens": 293,
+        "otherTokens": 8995,
         "overheadTokens": 48298
       }
     },
@@ -7684,7 +7684,7 @@
             "sessionID": "ses_golden_boundary",
             "type": "text",
             "synthetic": true,
-            "text": "[Context Summary]\n## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [Assistant turn summary] [tool:bash] npm test — ok Raw transcript: .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok\n\n## Reference Files\n- \".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\""
+            "text": "[Context Summary]\n## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [tool:bash] npm test — ok\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok\n\n## Reference Files\n- \".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\""
           }
         ]
       },
@@ -7803,7 +7803,7 @@
         ]
       }
     ],
-    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before     60K / 120K    [█████████░░░░░░░░░]  50%\n  Now      57.6K / 120K    [█████████░░░░░░░░░]  48% projected\n\n  Reduced 2.4K (4%)\n  Target 36K; 21.6K still above target\n  Largest retained components: provider overhead estimate ~48.3K, other retained content ~9K, handoff/reference and archive catalog ~322\n\n  Actions\n  ✓ Pruned old tool calls/results          -1.6K\n  ✓ Summarized assistant turns             increased +29\n  ✓ Last-resort prefix summary             -3\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n  5 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
+    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before     60K / 120K    [█████████░░░░░░░░░]  50%\n  Now      57.6K / 120K    [█████████░░░░░░░░░]  48% projected\n\n  Reduced 2.4K (4%)\n  Target 36K; 21.6K still above target\n  Largest retained components: provider overhead estimate ~48.3K, other retained content ~9K, handoff/reference and archive catalog ~293\n\n  Actions\n  ✓ Pruned old tool calls/results          -1.6K\n  ✓ Last-resort prefix summary             -2\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n  5 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
     "snapshot": {
       "sessionId": "ses_golden_boundary",
       "rangeHash": "7e93129c2ddaba39",
@@ -7811,12 +7811,12 @@
       "rawTailStartMessageId": "msg-user-3",
       "transcriptRelativePath": ".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md",
       "beforeTokens": 60000,
-      "afterPruneTokens": 57633,
+      "afterPruneTokens": 57605,
       "residual": {
         "rawTailTokens": 19,
         "protectedPartTokens": 0,
-        "handoffTokens": 322,
-        "otherTokens": 8994,
+        "handoffTokens": 293,
+        "otherTokens": 8995,
         "overheadTokens": 48298
       },
       "overheadTokens": 48298,
@@ -7835,7 +7835,7 @@
       "reasoningSurvivesPrefix": true,
       "assistantSummaryKeys": [],
       "assistantSummaries": {},
-      "prefixSummary": "## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [Assistant turn summary] [tool:bash] npm test — ok Raw transcript: .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok",
+      "prefixSummary": "## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [tool:bash] npm test — ok\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok",
       "stages": [
         {
           "name": "skills",
@@ -7901,18 +7901,18 @@
           "name": "assistant-runs",
           "label": "Summarized assistant turns",
           "beforeTokens": 58430,
-          "afterTokens": 58459,
+          "afterTokens": 58430,
           "clearedTokens": 0,
-          "changedMessages": 1,
+          "changedMessages": 0,
           "changedParts": 0,
-          "status": "applied"
+          "status": "skipped"
         },
         {
           "name": "prefix-summary",
           "label": "Last-resort prefix summary",
-          "beforeTokens": 58671,
-          "afterTokens": 58668,
-          "clearedTokens": 3,
+          "beforeTokens": 58642,
+          "afterTokens": 58640,
+          "clearedTokens": 2,
           "changedMessages": 5,
           "changedParts": 9,
           "status": "failed"
@@ -7947,7 +7947,7 @@
                 "sessionID": "ses_golden_boundary",
                 "type": "text",
                 "synthetic": true,
-                "text": "[Context Summary]\n## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [Assistant turn summary] [tool:bash] npm test — ok Raw transcript: .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok\n\n## Reference Files\n- \".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\""
+                "text": "[Context Summary]\n## Decisions\n- (none)\n\n## Files & Symbols\n- (none)\n\n## Errors (verbatim)\n- (none)\n\n## What failed and why\n- (none)\n\n## Constraints\n- First task, keep this requirement.\n- Second task.\n\n## Next step\n- Resume from prior assistant progress: big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assistant-detail big-assis [...omitted]\n- Resume from prior assistant progress: [tool:bash] npm test — ok\n- Resume from prior assistant progress: small assistant detail [tool:grep] needle — ok\n\n## Reference Files\n- \".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\""
               }
             ]
           },

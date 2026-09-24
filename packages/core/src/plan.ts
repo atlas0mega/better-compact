@@ -98,6 +98,8 @@ export interface BoundaryContextOptions {
      * Defaults to true.
      */
     prefixSummaryAllowed?: boolean
+    /** Planning-only: retain an existing checkpoint while new turns remain native until Luna is tried. */
+    deferPrefixConsolidation?: boolean
     // The snapshot this plan replaces. Replacement plans treat what the
     // prior plan already pruned as a monotonic floor: applied stages stay
     // applied, tool results the model already lost are not resurrected,
@@ -149,6 +151,8 @@ export interface BoundaryContextPlan {
     stages: BoundaryStageReport[]
     summaryJobs: BoundarySummaryJob[]
     assistantSummaryKeys: string[]
+    /** Consecutive older pruned stubs folded into one replayable action record. */
+    stubGroupKeys?: string[][]
     assistantSummaries: Record<string, string>
     prefixSummary?: string
     archiveCatalogText?: string
@@ -192,6 +196,7 @@ export interface PlanSnapshot {
     reasoningSurvivesPrefix?: boolean
     preservedPrefixTurnKeys?: string[]
     assistantSummaryKeys?: string[]
+    stubGroupKeys?: string[][]
     assistantSummaries?: Record<string, string>
     prefixSummary?: string
     archiveCatalogText?: string
@@ -244,6 +249,7 @@ export function toPlanSnapshot(plan: BoundaryContextPlan): PlanSnapshot {
         reasoningSurvivesPrefix: plan.reasoningSurvivesPrefix,
         preservedPrefixTurnKeys: plan.preservedPrefixTurnKeys,
         assistantSummaryKeys: plan.assistantSummaryKeys,
+        stubGroupKeys: plan.stubGroupKeys,
         assistantSummaries: plan.assistantSummaries,
         prefixSummary: plan.prefixSummary,
         archiveCatalogText: plan.archiveCatalogText,

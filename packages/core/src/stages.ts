@@ -22,11 +22,16 @@ export interface StageContext {
     protectRecentTools?: boolean
     preservedReasoningItemKeys: ReadonlySet<string>
     protectedAssistantItemKeys?: ReadonlySet<string>
+    /** Previously compacted native turns cannot be resurrected just to pad a later plan. */
+    retentionStartIndex?: number
     // Latest todo across the original compacted range; preserved tool items
     // folded into a collapsed run still surface their todo state.
     latestTodoCallId: string | null
     assistantSummaries: Record<string, string>
     assistantSummaryKeys: Set<string>
+    /** OpenCode-only; recorded groups are replayed over the same pruned native turns. */
+    stubGroupKeys?: string[][]
+    selectStubGroups?: boolean
     summaryJobs: BoundarySummaryJob[]
     // Planning selects runs to meet the target; replay reuses recorded keys.
     selectRuns: boolean
@@ -221,16 +226,66 @@ export function transformCompactedPrefix(turns: Turn[], ctx: StageContext): Turn
     // Same unit rule as assistantGroups: one collapsible turn, one key. The two
     // must agree or a selected key finds nothing to collapse and the plan
     // promises savings the applied output never delivers.
-    return turns.map((turn) => {
+    return foldStubGroups(
+        turns.map((turn) => {
+            if (
+                turn.role === "user" ||
+                isPreservedTurn(turn, ctx.conventions) ||
+                hasProtectedParts(turn, ctx)
+            )
+                return turn
+            return ctx.assistantSummaryKeys.has(assistantRunKey([turn]))
+                ? collapseAssistantRun([turn], ctx)
+                : turn
+        }),
+        ctx.stubGroupKeys ?? [],
+    )
+}
+
+function foldStubGroups(turns: Turn[], groups: readonly (readonly string[])[]): Turn[] {
+    if (!groups.length) return turns
+    const byFirstKey = new Map(groups.map((keys) => [keys[0], keys]))
+    const result: Turn[] = []
+    for (let index = 0; index < turns.length;) {
+        const keys = byFirstKey.get(turns[index].key)
+        const members = keys?.map((key, offset) =>
+            turns[index + offset]?.key === key ? turns[index + offset] : null,
+        )
         if (
-            turn.role === "user" ||
-            isPreservedTurn(turn, ctx.conventions) ||
-            hasProtectedParts(turn, ctx)
-        ) return turn
-        return ctx.assistantSummaryKeys.has(assistantRunKey([turn]))
-            ? collapseAssistantRun([turn], ctx)
-            : turn
-    })
+            !keys ||
+            !members?.every(
+                (turn) =>
+                    turn?.role === "assistant" &&
+                    turn.items.every((item) => item.kind === "synthetic"),
+            )
+        ) {
+            result.push(turns[index++])
+            continue
+        }
+        result.push(foldedStubTurn(members as Turn[]))
+        index += keys.length
+    }
+    return result
+}
+
+function foldedStubTurn(turns: Turn[]): Turn {
+    const actions = turns.flatMap((turn) =>
+        turn.items.map((item) => (item.kind === "synthetic" ? oneLine(item.text).trim() : "")),
+    )
+    const failures = actions.filter((text) => /\b(error|failed|denied)\b/i.test(text)).slice(-3)
+    const recent = actions.slice(-3)
+    const selected = [...new Set([...failures, ...recent])]
+    const text = [
+        `[Older assistant/tool activity: ${turns.length} turns; exact details in the archive]`,
+        ...selected.map((line) => `- ${truncate(line, 180)}`),
+        ...(actions.length > selected.length
+            ? [`- ${actions.length - selected.length} earlier actions archived.`]
+            : []),
+    ].join("\n")
+    return {
+        ...turns[0],
+        items: [{ kind: "synthetic", key: syntheticTextKey(turns[0].key, text), text }],
+    }
 }
 
 function hasProtectedParts(turn: Turn, ctx: StageContext): boolean {
@@ -630,10 +685,20 @@ function firstLine(value: string): string {
 
 function compactAssistantRuns(working: Turn[], ctx: StageContext): StageMutationResult {
     const compacted = working.slice(0, ctx.rawTailStartIndex)
+    // An old cached summary was created from the original, bulky turn. After
+    // tool/reasoning pruning it may cost more than the turn it would replace.
+    // Its key must be retired too, or replay re-injects it on every request.
+    for (const group of assistantGroups(compacted, ctx.conventions)) {
+        if (!ctx.assistantSummaryKeys.has(group.key)) continue
+        if (replacementCost(group.turns, ctx) < ctx.codec.estimateTurns(group.turns)) continue
+        ctx.assistantSummaryKeys.delete(group.key)
+        delete ctx.assistantSummaries[group.key]
+    }
     if (ctx.selectRuns) {
         const selected = selectAssistantRunsToSummarize(compacted, working, ctx)
         for (const key of selected) ctx.assistantSummaryKeys.add(key)
     }
+    if (ctx.selectRuns && ctx.selectStubGroups) selectStubGroups(compacted, working, ctx)
     const transformed = transformCompactedPrefix(compacted, ctx)
     const tail = working.slice(ctx.rawTailStartIndex)
     const changedTurns = new Set<string>()
@@ -650,7 +715,68 @@ function compactAssistantRuns(working: Turn[], ctx: StageContext): StageMutation
     }
     working.length = 0
     working.push(...transformed, ...tail)
+    for (const keys of ctx.stubGroupKeys ?? []) {
+        if (keys.every((key) => compacted.some((turn) => turn.key === key))) {
+            for (const key of keys) changedTurns.add(key)
+            changedItems += keys.length - 1
+        }
+    }
     return { changedTurns, changedItems }
+}
+
+function selectStubGroups(compacted: Turn[], allTurns: Turn[], ctx: StageContext): void {
+    const groups = ctx.stubGroupKeys ?? (ctx.stubGroupKeys = [])
+    const alreadyGrouped = new Set(groups.flat())
+    const minGroupSize = 3
+    const maxGroupSize = 32
+    let projection =
+        estimateTurns(
+            [
+                ...transformCompactedPrefix(compacted, {
+                    ...ctx,
+                    summaryJobs: [],
+                    summariesAllowed: false,
+                }),
+                ...allTurns.slice(ctx.rawTailStartIndex),
+            ],
+            ctx.codec,
+            ctx.estimator,
+        ) + ctx.referenceTokens
+    if (projection <= ctx.targetTokens) return
+    for (let index = 0; index < compacted.length - minGroupSize + 1;) {
+        const eligible = (turn: Turn) =>
+            turn.role === "assistant" &&
+            !alreadyGrouped.has(turn.key) &&
+            !ctx.assistantSummaryKeys.has(assistantRunKey([turn])) &&
+            !hasProtectedParts(turn, ctx) &&
+            turn.items.length > 0 &&
+            turn.items.every((item) => item.kind === "synthetic")
+        if (!eligible(compacted[index])) {
+            index++
+            continue
+        }
+        let end = index
+        while (end < compacted.length && end - index < maxGroupSize && eligible(compacted[end]))
+            end++
+        let chosen = 0
+        let savings = 0
+        for (let size = minGroupSize; size <= end - index; size++) {
+            const original = compacted.slice(index, index + size)
+            const saved =
+                ctx.codec.estimateTurns(original) -
+                ctx.codec.estimateTurns([foldedStubTurn(original)])
+            if (saved > savings && projection - saved >= ctx.targetTokens) {
+                chosen = size
+                savings = saved
+            }
+        }
+        if (chosen > 0) {
+            groups.push(compacted.slice(index, index + chosen).map((turn) => turn.key))
+            projection -= savings
+            if (projection <= ctx.targetTokens) break
+            index += chosen
+        } else index = Math.max(index + 1, end)
+    }
 }
 
 function selectAssistantRunsToSummarize(
@@ -669,11 +795,9 @@ function selectAssistantRunsToSummarize(
         .filter((group) => !group.turns.some((turn) => hasProtectedParts(turn, ctx)))
         .map((group) => {
             const before = estimateTurns(group.turns, ctx.codec, { overheadTokens: 0 })
-            const summaryText = group.turns.map(turnText).filter(Boolean).join("\n\n")
-            const after = Math.max(
-                1,
-                countTokens(truncate(summaryText, ASSISTANT_TEXT_PREVIEW_CHARS)),
-            )
+            // Price the replacement that will actually be sent, including a
+            // cached summary, header and notes—not a short preview alone.
+            const after = replacementCost(group.turns, ctx)
             return { ...group, size: before, savings: Math.max(0, Math.round(before - after)) }
         })
         .filter((group) => group.savings > 0)
@@ -700,6 +824,12 @@ function selectAssistantRunsToSummarize(
         if (selectedSavings >= needed) break
     }
     return selected
+}
+
+function replacementCost(turns: Turn[], ctx: StageContext): number {
+    return ctx.codec.estimateTurns([
+        collapseAssistantRun(turns, { ...ctx, summaryJobs: [], summariesAllowed: false }),
+    ])
 }
 
 export function assistantGroups(

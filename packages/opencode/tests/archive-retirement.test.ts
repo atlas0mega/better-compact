@@ -165,7 +165,9 @@ test("a failed or skipped handoff keeps first-boundary wording until older descr
         afterSecond.entries.every((e) => e.status === "pending"),
         "descriptions run separately in the background",
     )
-    assert.ok(afterSecond.checkpoint)
+    // A valid handoff is not installed when its complete outgoing context
+    // costs more than the cheap plan. Either way the old wording stays live.
+    if (afterSecond.checkpoint) assert.match(afterSecond.checkpoint, /Red supersedes blue/)
     assert.match(JSON.stringify(second), /Use the original blue policy for parser migration/)
     assert.match(JSON.stringify(second), /red policy/i)
     assert.deepEqual(
@@ -177,6 +179,63 @@ test("a failed or skipped handoff keeps first-boundary wording until older descr
         await readArchiveEntry(directory, afterSecond, afterSecond.entries[0].id),
         /Use the original blue policy for parser migration/,
     )
+})
+
+test("OpenCode attempts a Luna handoff from the cheap plan before falling back", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bc-luna-first-"))
+    const state = createSessionState(sessionId)
+    state.modelContextLimit = 20_000
+    const messages = [
+        message("luna-user-old", "user", "Keep the original parser instruction.", 1),
+        ...Array.from({ length: 20 }, (_, index) =>
+            message(
+                `luna-assistant-${index}`,
+                "assistant",
+                `Earlier progress ${index}: ${"parser evidence ".repeat(170)}`,
+                index + 2,
+            ),
+        ),
+        message("luna-user-current", "user", "Continue parser work.", 30),
+        message("luna-user-latest", "user", "Preserve this latest correction.", 31),
+    ]
+    let calls = 0
+    const outgoing = structuredClone(messages)
+    const plan = await processBoundaryTransform({
+        state,
+        logger: new Logger(false),
+        config: config(),
+        directory,
+        messages: outgoing,
+        summariesAllowed: true,
+        summarizeArchive: async (cheap) => {
+            calls++
+            assert.equal(cheap.requiresCustomCompaction, false)
+            assert.ok(cheap.afterPruneTokens > cheap.targetTokens * 1.15)
+            return { ok: false, calls: 1, reason: "invalid_output" }
+        },
+    })
+    assert.equal(calls, 1)
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.match(JSON.stringify(outgoing), /Preserve this latest correction/)
+
+    const withinBand = config()
+    withinBand.compaction.custom!.targetPercent = 60
+    const otherState = createSessionState(sessionId)
+    otherState.modelContextLimit = 20_000
+    let withinBandCalls = 0
+    await processBoundaryTransform({
+        state: otherState,
+        logger: new Logger(false),
+        config: withinBand,
+        directory: mkdtempSync(join(tmpdir(), "bc-luna-band-")),
+        messages: structuredClone(messages),
+        summariesAllowed: true,
+        summarizeArchive: async () => {
+            withinBandCalls++
+            return { ok: false, calls: 0, reason: "invalid_output" }
+        },
+    })
+    assert.equal(withinBandCalls, 0, "Luna must not run when cheap pruning fits the band")
 })
 
 test("a first-boundary handoff that already quotes a user correction does not count it twice", () => {
@@ -283,7 +342,12 @@ test("round two retires only described older wording and keeps the newly archive
         message("middle-user", "user", "Check the migration tests.", 3),
         message("middle-work", "assistant", "Reviewed src/parser.ts", 4),
         ...Array.from({ length: 6 }, (_, index) =>
-            message(`later-work-${index}`, "assistant", `Checked parser stage ${index}.`, 5 + index),
+            message(
+                `later-work-${index}`,
+                "assistant",
+                `Checked parser stage ${index}.`,
+                5 + index,
+            ),
         ),
         message("latest-user", "user", "Correction: use red policy instead of blue.", 11),
     ]
@@ -310,7 +374,11 @@ test("round two retires only described older wording and keeps the newly archive
         directory,
         messages: first,
         summariesAllowed: true,
-        summarizeArchive: async () => ({ ok: true, calls: 1, handoff: sections("Blue was replaced by red.") }),
+        summarizeArchive: async () => ({
+            ok: true,
+            calls: 1,
+            handoff: sections("Blue was replaced by red."),
+        }),
     })
     const catalog = await loadArchiveCatalog(directory, sessionId)
     assert.equal(catalog.entries.length, 1)
@@ -323,7 +391,12 @@ test("round two retires only described older wording and keeps the newly archive
     await saveArchiveCatalog(directory, catalog)
     const advanced = [
         ...structuredClone(initial),
-        message("new-work", "assistant", `Red parser migration ${"checked tests ".repeat(1_500)}`, 12),
+        message(
+            "new-work",
+            "assistant",
+            `Red parser migration ${"checked tests ".repeat(1_500)}`,
+            12,
+        ),
         message("new-user", "user", "Keep the red correction and finish tests.", 13),
     ]
     await processBoundaryTransform({
@@ -333,7 +406,11 @@ test("round two retires only described older wording and keeps the newly archive
         directory,
         messages: advanced,
         summariesAllowed: true,
-        summarizeArchive: async () => ({ ok: true, calls: 1, handoff: sections("Red policy is current.") }),
+        summarizeArchive: async () => ({
+            ok: true,
+            calls: 1,
+            handoff: sections("Red policy is current."),
+        }),
     })
     const second = await loadArchiveCatalog(directory, sessionId)
     assert.equal(second.entries.length, 2)
@@ -344,5 +421,8 @@ test("round two retires only described older wording and keeps the newly archive
         advanced.find((entry) => entry.info.id === "new-user"),
         message("new-user", "user", "Keep the red correction and finish tests.", 13),
     )
-    assert.match(await readArchiveEntry(directory, second, second.entries[0].id), /Old blue policy verbatim/)
+    assert.match(
+        await readArchiveEntry(directory, second, second.entries[0].id),
+        /Old blue policy verbatim/,
+    )
 })

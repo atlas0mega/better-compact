@@ -1075,9 +1075,17 @@ async function runBetterCompact(input: {
             retirementThrough: catalog.retirementThrough,
             priorPlan: input.state.boundary.activePlan ?? undefined,
         }
+        const modelFirst = summariesAllowed && profile.prefixSummary
+        const tailBudgetTokens = efficientAgenticTailBudget(input.messages, {
+            ...planOptions,
+            prefixSummaryAllowed: modelFirst ? false : profile.prefixSummary,
+        })
         const plan = buildBoundaryContextPlan(input.messages, {
             ...planOptions,
-            tailBudgetTokens: efficientAgenticTailBudget(input.messages, planOptions),
+            prefixSummaryAllowed: modelFirst ? false : profile.prefixSummary,
+            deferPrefixConsolidation:
+                modelFirst && input.state.boundary.activePlan?.requiresCustomCompaction === true,
+            tailBudgetTokens,
         })
         if (!plan) {
             setBoundaryStage(input.state, "scan", "skipped", "No eligible historical context found")
@@ -1239,7 +1247,10 @@ async function runBetterCompact(input: {
                 candidate.validatedCheckpointId = candidate.entries.at(-1)?.id
                 const newest = candidate.entries.at(-1)
                 if (newest)
-                    candidate.retirementThrough = eligibleRetirementThrough(candidate, newest.sequence)
+                    candidate.retirementThrough = eligibleRetirementThrough(
+                        candidate,
+                        newest.sequence,
+                    )
                 const rebuilt = buildBoundaryContextPlan(input.messages, {
                     contextLimit,
                     force: true,
@@ -1261,12 +1272,15 @@ async function runBetterCompact(input: {
                     recentToolResultBudgetTokens: profile.recentToolTokens,
                     recentReasoningBudgetTokens: profile.recentReasoningTokens,
                     minTailUserTurns,
+                    tailBudgetTokens,
                     prefixSummaryAllowed: profile.prefixSummary,
                     collapsePercent: profile.collapsePercent,
                     providerReportedTokens: reportedCurrentTokens,
                     providerHistoryTokens,
                     summariesAllowed,
-                    priorPlan: toBoundaryPlanSnapshot(plan, input.messages),
+                    priorPlan: modelFirst
+                        ? (input.state.boundary.activePlan ?? undefined)
+                        : toBoundaryPlanSnapshot(plan, input.messages),
                 })
                 if (
                     rebuilt?.requiresCustomCompaction &&
@@ -1320,11 +1334,28 @@ async function runBetterCompact(input: {
                 "prefix-summary",
                 finalPlan === plan ? "failed" : "completed",
                 finalPlan === plan
-                    ? "Kept safe deterministic handoff"
+                    ? "Luna handoff unavailable; deterministic fallback remains available"
                     : `Applied archive handoff: ${formatCompactTokens(plan.afterPruneTokens)} -> ${formatCompactTokens(finalPlan.afterPruneTokens)}`,
             )
             await saveProgress()
         }
+        if (
+            modelFirst &&
+            finalPlan === plan &&
+            finalPlan.afterPruneTokens > Math.floor(finalPlan.targetTokens * 1.15)
+        ) {
+            const fallback = buildBoundaryContextPlan(input.messages, {
+                ...planOptions,
+                tailBudgetTokens,
+                prefixSummaryAllowed: profile.prefixSummary,
+                archiveCatalogText: liveArchiveDescriptions(catalog),
+                archiveGeneration: catalog.entries.length,
+                retirementThrough: catalog.retirementThrough,
+            })
+            if (fallback && fallback.afterPruneTokens < finalPlan.afterPruneTokens)
+                finalPlan = fallback
+        }
+        if (modelFirst) finalPlan.prefixSummaryAllowed = profile.prefixSummary
         if (prefixChunks.length > 0) {
             prefixAttempted = true
             setBoundaryStage(

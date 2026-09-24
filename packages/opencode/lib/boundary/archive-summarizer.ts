@@ -323,15 +323,13 @@ export async function summarizeArchiveBoundary(input: {
         )
     let source: Array<{ text: string; tokens: number }> = []
     const condensed: typeof source = []
-    const retainedTools = new Set(
-        input.plan?.toolSurvivesPrefix ? input.plan.preservedToolCallIds : [],
-    )
-    const retainedReasoning = new Set(
-        input.plan?.reasoningSurvivesPrefix ? input.plan.preservedReasoningItemKeys : [],
-    )
-    const retainedAssistantText = new Set(
-        input.plan?.assistantSurvivesPrefix ? input.plan.protectedAssistantItemKeys : [],
-    )
+    // A Luna-first pass receives the cheap plan, before a prefix has been
+    // selected. These parts are already marked to survive any later prefix;
+    // do not ask Luna to restate them simply because the cheap plan's
+    // *survivesPrefix* flags are still false.
+    const retainedTools = new Set(input.plan?.preservedToolCallIds ?? [])
+    const retainedReasoning = new Set(input.plan?.preservedReasoningItemKeys ?? [])
+    const retainedAssistantText = new Set(input.plan?.protectedAssistantItemKeys ?? [])
     const retainedNativeTurns = new Set(input.plan?.preservedPrefixTurnKeys ?? [])
     let priorGoalIndex = -1
     for (const entry of pending) {

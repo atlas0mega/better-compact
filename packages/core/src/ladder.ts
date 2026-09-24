@@ -207,11 +207,16 @@ export function buildPlan(
         protectRecentTools: inputs.preservePrefixBudgets,
         preservedReasoningItemKeys: anchored?.reasoningKeys ?? new Set<string>(),
         protectedAssistantItemKeys: anchored?.textKeys,
+        retentionStartIndex: priorBoundary
+            ? partitionTurns(turns, priorBoundary).compactedRange.length
+            : 0,
         latestTodoCallId: findLatestTodoCallId(compactedRange, spec.conventions),
         assistantSummaries,
         assistantSummaryKeys: new Set<string>(
             prior?.requiresCustomCompaction ? [] : (prior?.assistantSummaryKeys ?? []),
         ),
+        stubGroupKeys: prior?.requiresCustomCompaction ? [] : [...(prior?.stubGroupKeys ?? [])],
+        selectStubGroups: inputs.preservePrefixBudgets === true,
         summaryJobs,
         selectRuns: true,
         sourceTurns: new Map(compactedRange.map((turn) => [turn.key, turn])),
@@ -221,6 +226,11 @@ export function buildPlan(
         summariesAllowed: inputs.summariesAllowed !== false,
     }
     const prefixSummaryAllowed = inputs.prefixSummaryAllowed !== false
+    const deferPrefix =
+        inputs.deferPrefixConsolidation === true &&
+        prior?.requiresCustomCompaction === true &&
+        priorPrefixSummary !== undefined &&
+        inputs.prefixSummary === undefined
     // The applied output always carries a reference message; gates must account
     // for it so a "trigger met" claim holds for the real transformed context.
     const reference = synthesizeReferenceTurn(turns, compactedRange, ctx, compactedRangeHash)
@@ -270,13 +280,14 @@ export function buildPlan(
     let prefixSummary =
         inputs.prefixSummary ??
         rolledPrefixSummary ??
-        (expandedPrefix ? undefined : priorPrefixSummary)
+        (expandedPrefix && !deferPrefix ? undefined : priorPrefixSummary)
     // The target is best-effort. Within 15% of it, do not replace an entire
     // older prefix merely to shave the last few tokens. A previously applied
     // prefix still carries historical state and must remain monotonic.
     if (
-        prefixSummaryAllowed &&
-        (projectedTokens() > Math.floor(targetTokens * 1.15) ||
+        (prefixSummaryAllowed || deferPrefix) &&
+        (deferPrefix ||
+            projectedTokens() > Math.floor(targetTokens * 1.15) ||
             prior?.requiresCustomCompaction ||
             inputs.prefixSummary !== undefined)
     ) {
@@ -285,6 +296,7 @@ export function buildPlan(
                 ? turnsBetweenBoundaries(turns, priorBoundary, boundary)
                 : []
         if (
+            !deferPrefix &&
             expandedPrefix &&
             priorPrefixSummary &&
             inputs.prefixSummary === undefined &&
@@ -300,6 +312,7 @@ export function buildPlan(
                 prefixSummary = dedupeRepeatableUserTextInSummary(extended, turns, spec.conventions)
         }
         if (
+            !deferPrefix &&
             ctx.summariesAllowed !== false &&
             prefixSummaryJobKey &&
             priorPrefixSummary &&
@@ -368,9 +381,8 @@ export function buildPlan(
             const eligibleStart = priorBoundary
                 ? partitionTurns(turns, priorBoundary).compactedRange.length
                 : 0
-            const prefixEnd = currentTailStartIndex > 0
-                ? currentTailStartIndex
-                : partition.rawTailStartIndex
+            const prefixEnd =
+                currentTailStartIndex > 0 ? currentTailStartIndex : partition.rawTailStartIndex
             const previouslyNative = new Set(prior?.preservedPrefixTurnKeys ?? [])
             // Earlier native prefix turns are a continuity floor until a new,
             // validated handoff can retire the archive cohort containing them.
@@ -386,13 +398,27 @@ export function buildPlan(
                 preservedPrefixTurnKeys.push(candidate.key)
                 headroom -= spec.codec.estimateTurns([candidate])
             }
-            for (let index = prefixEnd - 1; index >= eligibleStart; index--) {
-                const candidate = source[index]
-                if (previouslyNative.has(candidate.key)) continue
-                const cost = spec.codec.estimateTurns([candidate])
-                if (cost > headroom) break
-                preservedPrefixTurnKeys.unshift(candidate.key)
-                headroom -= cost
+            if (deferPrefix) {
+                // The old checkpoint already covers its earlier prefix. Keep
+                // *all new* pruned turns native until the side model has had
+                // its chance; do not pre-collapse them into a fallback.
+                preservedPrefixTurnKeys = [
+                    ...new Set([
+                        ...preservedPrefixTurnKeys,
+                        ...source.slice(eligibleStart, prefixEnd).map((turn) => turn.key),
+                    ]),
+                ]
+            } else {
+                for (let index = prefixEnd - 1; index >= eligibleStart; index--) {
+                    const candidate = source[index]
+                    if (previouslyNative.has(candidate.key)) continue
+                    const cost = spec.codec.estimateTurns([candidate])
+                    // A single oversized turn must not strand otherwise useful
+                    // smaller native turns below the target.
+                    if (cost > headroom) continue
+                    preservedPrefixTurnKeys.unshift(candidate.key)
+                    headroom -= cost
+                }
             }
         }
         const result = applyPrefixSummary(
@@ -419,7 +445,7 @@ export function buildPlan(
             clearedTokens: Math.max(0, beforePrefix - afterPrefix),
             changedMessages: result.changedTurns.size,
             changedParts: result.changedItems,
-            status: afterPrefix <= targetTokens ? "applied" : "failed",
+            status: deferPrefix || afterPrefix <= targetTokens ? "applied" : "failed",
         })
     }
 
@@ -465,14 +491,10 @@ export function buildPlan(
         ...(inputs.recentAssistantOutputs !== undefined
             ? { recentAssistantOutputs: inputs.recentAssistantOutputs }
             : {}),
-        ...(anchored?.textKeys.size
-            ? { protectedAssistantItemKeys: [...anchored.textKeys] }
-            : {}),
+        ...(anchored?.textKeys.size ? { protectedAssistantItemKeys: [...anchored.textKeys] } : {}),
         ...(anchored?.limited ? { anchorReasoningLimited: true } : {}),
         assistantSurvivesPrefix:
-            !!inputs.preservePrefixBudgets &&
-            requiresCustomCompaction &&
-            !!anchored?.textKeys.size,
+            !!inputs.preservePrefixBudgets && requiresCustomCompaction && !!anchored?.textKeys.size,
         reasoningSurvivesPrefix:
             !!inputs.preservePrefixBudgets &&
             requiresCustomCompaction &&
@@ -491,6 +513,9 @@ export function buildPlan(
         // Once the consolidated prefix is materialized, its per-turn inputs
         // are absorbed. Keep caches only when replay still needs those turns.
         assistantSummaryKeys: requiresCustomCompaction ? [] : [...ctx.assistantSummaryKeys],
+        ...(ctx.stubGroupKeys?.length && !requiresCustomCompaction
+            ? { stubGroupKeys: ctx.stubGroupKeys }
+            : {}),
         assistantSummaries: requiresCustomCompaction ? {} : ctx.assistantSummaries,
         prefixSummary,
         archiveCatalogText: inputs.archiveCatalogText ?? prior?.archiveCatalogText,
@@ -570,6 +595,7 @@ export function transformTurns(
         latestTodoCallId: findLatestTodoCallId(originalPrefix, spec.conventions),
         assistantSummaries: plan.assistantSummaries,
         assistantSummaryKeys: new Set(plan.assistantSummaryKeys),
+        stubGroupKeys: plan.stubGroupKeys,
         summaryJobs: [],
         selectRuns: false,
         sourceTurns: new Map(originalPrefix.map((turn) => [turn.key, turn])),
@@ -677,6 +703,7 @@ export function replayPlanSnapshot(
             preservePrefixBudgets: snapshot.preservePrefixBudgets,
             assistantSummaryKeys:
                 snapshot.assistantSummaryKeys ?? Object.keys(snapshot.assistantSummaries ?? {}),
+            stubGroupKeys: snapshot.stubGroupKeys,
             transcript: {
                 relativePath: snapshot.transcriptRelativePath,
                 content: "",
@@ -876,7 +903,20 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                 sessionKey,
                 citablePath: ports.transcripts.citablePath,
             }
-            let plan = buildPlan(turns, inputs, spec)
+            // With an archive handoff available, finish every cheap stage
+            // before deciding whether a prefix is needed. Do not first apply
+            // the deterministic whole-prefix replacement and then ask Luna to
+            // improve an already over-pruned request.
+            const modelFirst =
+                !!summarizeArchive && prefixSummaryAllowed !== false && prefixSummary === undefined
+            const cheapInputs = modelFirst
+                ? {
+                      ...inputs,
+                      prefixSummaryAllowed: false,
+                      deferPrefixConsolidation: priorPlan?.requiresCustomCompaction === true,
+                  }
+                : inputs
+            let plan = buildPlan(turns, cheapInputs, spec)
             if (!plan) {
                 if (staleSnapshotCleared) await ports.plans.save(sessionKey, null)
                 return { outcome: "unchanged" }
@@ -904,13 +944,20 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             // The original source must be durable before a model summary can
             // replace any portion of it in the outgoing request.
             await ports.archive?.(plan)
+            const archiveInputs = {
+                ...inputs,
+                archiveCatalogText: plan.archiveCatalogText,
+                archiveGeneration: plan.archiveGeneration,
+                retirementThrough: plan.retirementThrough,
+            }
             // Once a prefix summary replaces all old turns, individual turn
             // summaries are no longer visible. Only a rolling prefix job can
             // improve that plan; avoid charging for discarded turn jobs.
             let prefixAttempted = false
+            let acceptedHandoff = false
             if (
                 (summarizeArchive || summarizePrefix) &&
-                plan.requiresCustomCompaction &&
+                (plan.requiresCustomCompaction || modelFirst) &&
                 plan.afterPruneTokens > Math.floor(plan.targetTokens * 1.15)
             ) {
                 try {
@@ -925,8 +972,12 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                         const rebuilt = buildPlan(
                             turns,
                             {
-                                ...inputs,
-                                priorPlan: toPlanSnapshot(plan),
+                                ...archiveInputs,
+                                // The cheap preview is not a prior *applied*
+                                // compaction boundary. Treating it as one
+                                // makes every older native turn ineligible to
+                                // fill headroom beside the new handoff.
+                                priorPlan: modelFirst ? inputs.priorPlan : toPlanSnapshot(plan),
                                 prefixSummary: replacement,
                                 archiveCatalogText:
                                     proposal?.catalogText ?? inputs.archiveCatalogText,
@@ -941,6 +992,7 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                         ) {
                             await proposal?.commit()
                             plan = rebuilt
+                            acceptedHandoff = true
                         } else {
                             await proposal?.discard?.()
                         }
@@ -956,6 +1008,15 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                     )
                 }
             }
+            if (
+                modelFirst &&
+                !acceptedHandoff &&
+                plan.afterPruneTokens > Math.floor(plan.targetTokens * 1.15)
+            ) {
+                const fallback = buildPlan(turns, archiveInputs, spec)
+                if (fallback && fallback.afterPruneTokens < plan.afterPruneTokens) plan = fallback
+            }
+            if (modelFirst) plan.prefixSummaryAllowed = prefixSummaryAllowed
             const activeJobs =
                 prefixAttempted || (summarizeArchive && plan.requiresCustomCompaction)
                     ? []
@@ -1210,7 +1271,17 @@ function runStage(
     ctx: StageContext,
 ): void {
     const beforeTokens = estimateTurns(working, codec, estimator)
+    const source =
+        ctx.protectRecentTools &&
+        beforeTokens > ctx.targetTokens &&
+        (stage.name === "tools-old" ||
+            stage.name === "tools-remaining" ||
+            stage.name === "reasoning")
+            ? cloneTurns(working)
+            : undefined
     const result = stage.run(working, ctx)
+    if (source && estimateTurns(working, codec, estimator) < ctx.targetTokens)
+        restoreUsefulHeadroom(working, source, stage, ctx)
     const afterTokens = estimateTurns(working, codec, estimator)
     stages.push({
         name: stage.name,
@@ -1222,6 +1293,57 @@ function runStage(
         changedParts: result.changedItems,
         status: result.changedTurns.size > 0 || result.changedItems > 0 ? "applied" : "skipped",
     })
+}
+
+/** If a cheap stage overshoots, retain newest whole native parts that fit.
+ * Never resurrect payloads that an earlier persisted boundary had removed. */
+function restoreUsefulHeadroom(
+    working: Turn[],
+    source: Turn[],
+    stage: Stage,
+    ctx: StageContext,
+): void {
+    let projected = estimateTurns(working, ctx.codec, ctx.estimator) + ctx.referenceTokens
+    const isReasoning = stage.name === "reasoning"
+    for (
+        let index = Math.min(ctx.rawTailStartIndex, source.length) - 1;
+        index >= (ctx.retentionStartIndex ?? 0) && projected < ctx.targetTokens;
+        index--
+    ) {
+        const turn = source[index]
+        if (turn.role !== "assistant") continue
+        for (const item of [...turn.items].reverse()) {
+            if (isReasoning ? item.kind !== "reasoning" : item.kind !== "tool") continue
+            const key = isReasoning ? item.key : item.kind === "tool" ? item.callId : ""
+            if (
+                !key ||
+                (isReasoning
+                    ? ctx.preservedReasoningItemKeys.has(key)
+                    : ctx.preservedToolCallIds.has(key))
+            )
+                continue
+            const approximateCost = isReasoning
+                ? countTokens(ctx.codec.transcriptLine(item))
+                : item.kind === "tool"
+                  ? ctx.codec.estimateItem(item)
+                  : 0
+            if (approximateCost > Math.max(0, ctx.targetTokens - projected) * 2) continue
+            const retained = isReasoning
+                ? new Set(ctx.preservedReasoningItemKeys).add(key)
+                : new Set(ctx.preservedToolCallIds).add(key)
+            const testContext: StageContext = isReasoning
+                ? { ...ctx, preservedReasoningItemKeys: retained }
+                : { ...ctx, preservedToolCallIds: retained }
+            const candidate = cloneTurns(source)
+            stage.run(candidate, testContext)
+            const cost = estimateTurns(candidate, ctx.codec, ctx.estimator) + ctx.referenceTokens
+            if (cost <= projected || cost > ctx.targetTokens) continue
+            working.splice(0, working.length, ...candidate)
+            projected = cost
+            if (isReasoning) ctx.preservedReasoningItemKeys = retained
+            else ctx.preservedToolCallIds = retained
+        }
+    }
 }
 
 // Tool results the model already lost to the prior plan must not resurface
@@ -1281,7 +1403,8 @@ function selectAnchoredConversation(
         if (
             turn.role === "assistant" &&
             turn.items.some((item) => item.kind === "text" && item.text.trim().length > 0)
-        ) selected.unshift(index)
+        )
+            selected.unshift(index)
     }
     if (!selected.length) return { textKeys, reasoningKeys, limited: false }
     const covered = new Set(compacted.flatMap((turn) => turn.items.map((item) => item.key)))
