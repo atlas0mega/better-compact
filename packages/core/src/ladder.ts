@@ -260,6 +260,15 @@ export function buildPlan(
         })
     }
 
+    // Per-turn summaries are not visible once the old prefix has become a
+    // single checkpoint. Keep only a rolling prefix job; do not charge for
+    // assistant-turn calls that cannot enter the applied context.
+    if (requiresCustomCompaction) {
+        for (let index = summaryJobs.length - 1; index >= 0; index--) {
+            if (!summaryJobs[index].key.startsWith("prefix-summary:")) summaryJobs.splice(index, 1)
+        }
+    }
+
     const plan: BoundaryContextPlan = {
         sessionId: inputs.sessionKey,
         rangeHash: compactedRangeHash,
@@ -269,6 +278,15 @@ export function buildPlan(
         overheadTokens,
         triggerTokens,
         targetTokens,
+        ...(inputs.prefixSummaryAllowed !== undefined
+            ? { prefixSummaryAllowed: inputs.prefixSummaryAllowed }
+            : {}),
+        ...(inputs.collapsePercent !== undefined
+            ? { collapsePercent: inputs.collapsePercent }
+            : {}),
+        ...(inputs.minTailUserTurns !== undefined
+            ? { minTailUserTurns: inputs.minTailUserTurns }
+            : {}),
         rawTailStartIndex,
         rawTailStartMessageId: turns[boundary.turnIndex]?.key ?? turns.at(-1)?.key ?? "",
         rawTailItemBoundary: recordedItemBoundary(turns, boundary),
@@ -450,6 +468,7 @@ export interface Engine {
         recentToolResultBudgetTokens?: number
         providerReportedTokens?: number
         tailBudgetTokens?: { floor: number; ceiling: number }
+        minTailUserTurns?: number
         summariesAllowed?: boolean
         prefixSummaryAllowed?: boolean
         collapsePercent?: number
@@ -458,6 +477,10 @@ export interface Engine {
         // fresh plan queues summary jobs, the engine runs them and rebuilds
         // the plan with the accepted summaries before persisting it.
         summarize?: (jobs: BoundarySummaryJob[]) => Promise<Record<string, string>>
+        summarizePrefix?: (
+            plan: BoundaryContextPlan,
+            turns: Turn[],
+        ) => Promise<string | null | undefined>
     }): Promise<ProcessResult>
 }
 
@@ -476,13 +499,16 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             recentToolResultBudgetTokens,
             providerReportedTokens,
             tailBudgetTokens,
+            minTailUserTurns,
             summariesAllowed,
             prefixSummaryAllowed,
             collapsePercent,
             force,
             summarize,
+            summarizePrefix,
         }) {
             let staleSnapshotCleared = false
+            let tailPolicyChanged = false
             let priorPlan: PlanSnapshot | undefined
             const cached = await ports.plans.load(sessionKey)
             if (cached && cached.sessionId === sessionKey) {
@@ -497,6 +523,7 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                     cleanedSummary !== cached.prefixSummary
                         ? { ...cached, prefixSummary: cleanedSummary }
                         : cached
+                tailPolicyChanged = cached.minTailUserTurns !== minTailUserTurns
                 const budgetsMatch =
                     cached.contextLimit === contextLimit &&
                     cached.triggerTokens ===
@@ -504,7 +531,10 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                             Math.floor((contextLimit ?? 0) * (triggerRatio ?? TRIGGER_RATIO))) &&
                     cached.targetTokens ===
                         (targetTokens ??
-                            Math.floor((contextLimit ?? 0) * (targetRatio ?? TARGET_RATIO)))
+                            Math.floor((contextLimit ?? 0) * (targetRatio ?? TARGET_RATIO))) &&
+                    cached.prefixSummaryAllowed === prefixSummaryAllowed &&
+                    cached.collapsePercent === collapsePercent &&
+                    !tailPolicyChanged
                 const replayed =
                     force || !budgetsMatch
                         ? null
@@ -527,10 +557,11 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                 recentToolResultBudgetTokens,
                 providerReportedTokens,
                 tailBudgetTokens,
+                minTailUserTurns,
                 summariesAllowed,
                 prefixSummaryAllowed,
                 collapsePercent,
-                force,
+                force: force || tailPolicyChanged,
                 priorPlan,
                 sessionKey,
                 citablePath: ports.transcripts.citablePath,
@@ -540,20 +571,75 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                 if (staleSnapshotCleared) await ports.plans.save(sessionKey, null)
                 return { outcome: "unchanged" }
             }
-            if (summarize && plan.summaryJobs.length > 0) {
+            // Once a prefix summary replaces all old turns, individual turn
+            // summaries are no longer visible. Only a rolling prefix job can
+            // improve that plan; avoid charging for discarded turn jobs.
+            let prefixAttempted = false
+            if (
+                summarizePrefix &&
+                plan.requiresCustomCompaction &&
+                plan.afterPruneTokens > plan.targetTokens
+            ) {
                 try {
-                    const assistantSummaries = await summarize(plan.summaryJobs)
+                    const replacement = await summarizePrefix(plan, turns)
+                    prefixAttempted = replacement !== undefined
+                    if (replacement) {
+                        const rebuilt = buildPlan(
+                            turns,
+                            {
+                                ...inputs,
+                                priorPlan: toPlanSnapshot(plan),
+                                prefixSummary: replacement,
+                            },
+                            spec,
+                        )
+                        if (
+                            rebuilt?.requiresCustomCompaction &&
+                            rebuilt.afterPruneTokens < plan.afterPruneTokens
+                        )
+                            plan = rebuilt
+                    }
+                } catch (error) {
+                    prefixAttempted = true
+                    ports.logger.warn(
+                        "Chunked prefix summary failed; retaining deterministic plan",
+                        {
+                            sessionId: sessionKey,
+                            error: error instanceof Error ? error.message : String(error),
+                        },
+                    )
+                }
+            }
+            const activeJobs = prefixAttempted
+                ? []
+                : plan.requiresCustomCompaction
+                  ? plan.summaryJobs.filter((job) => job.key.startsWith("prefix-summary:"))
+                  : plan.summaryJobs
+            if (summarize && activeJobs.length > 0) {
+                try {
+                    const assistantSummaries = await summarize(activeJobs)
                     if (Object.keys(assistantSummaries).length > 0) {
-                        plan =
-                            buildPlan(
-                                turns,
-                                {
-                                    ...inputs,
-                                    priorPlan: toPlanSnapshot(plan),
-                                    assistantSummaries,
-                                },
-                                spec,
-                            ) ?? plan
+                        const rebuilt = buildPlan(
+                            turns,
+                            {
+                                ...inputs,
+                                priorPlan: toPlanSnapshot(plan),
+                                assistantSummaries,
+                            },
+                            spec,
+                        )
+                        // Structured per-turn summaries can cost more than the
+                        // deterministic previews they replace. Keep the smaller
+                        // plan when the whole batch would enlarge live context.
+                        if (rebuilt && rebuilt.afterPruneTokens <= plan.afterPruneTokens) {
+                            plan = rebuilt
+                        } else if (rebuilt) {
+                            ports.logger.info("Retained smaller plan after summary expansion", {
+                                sessionId: sessionKey,
+                                projectedTokens: plan.afterPruneTokens,
+                                summarizedTokens: rebuilt.afterPruneTokens,
+                            })
+                        }
                     }
                 } catch (error) {
                     ports.logger.warn("Summary scheduling failed; using deterministic fallback", {
@@ -773,6 +859,13 @@ function applyPreservationFloor(
     if (!prior || priorCompactedRange.length === 0) return
     const previouslyPreserved = new Set(prior.preservedToolCallIds ?? [])
     for (const turn of priorCompactedRange) {
+        if (
+            turn.prunableToolLike &&
+            preservedToolCallIds.has(turn.key) &&
+            !previouslyPreserved.has(turn.key)
+        ) {
+            preservedToolCallIds.delete(turn.key)
+        }
         for (const item of turn.items) {
             if (
                 item.kind === "tool" &&

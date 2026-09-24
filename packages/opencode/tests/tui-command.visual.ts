@@ -50,6 +50,7 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
                 path: { directory: configHome, worktree: configHome },
                 session: {
                     get: () => ({
+                        agent: "tennis-mc-specialist",
                         model: {
                             id: "model-1",
                             providerID: "provider-1",
@@ -153,6 +154,7 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
         assert.equal(metadata.summaryModelID, "model-1")
         assert.equal(metadata.summaryVariant, "high")
         assert.deepEqual(promptInput.model, { providerID: "provider-1", modelID: "model-1" })
+        assert.equal(promptInput.agent, "tennis-mc-specialist")
         assert.equal(promptInput.variant, "high")
 
         api.ui.dialog.clear()

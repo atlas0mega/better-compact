@@ -2,6 +2,7 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import {
     buildPlan,
+    findRawTailStartIndex,
     rangeHash,
     replayPlanSnapshot,
     toPlanSnapshot,
@@ -13,8 +14,14 @@ import {
 } from "@better-compact/core"
 import type { Logger } from "../logger"
 import { openCodeCodec, openCodeSpec, sessionKeyOf } from "../codec"
-import { loadPersistedBoundaryPlans, type BoundaryPlanSnapshot, type SessionState, type WithParts } from "../state"
+import {
+    loadPersistedBoundaryPlans,
+    type BoundaryPlanSnapshot,
+    type SessionState,
+    type WithParts,
+} from "../state"
 import { boundaryRangeHash } from "./fingerprint"
+import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore, transcriptCitablePath } from "./transcripts"
 
 export type {
@@ -25,6 +32,22 @@ export type {
     BoundarySummaryJob,
     BoundaryTranscriptArtifact,
 } from "@better-compact/core"
+
+// Two real user turns normally frame the current task. In an agentic loop,
+// that span may exceed the entire target: keep the newest user turn raw and
+// move older complete turns into the citable transcript instead.
+export function adaptiveTailUserTurns(
+    messages: WithParts[],
+    contextLimit: number,
+    targetPercent: number,
+    targetTokens?: number | null,
+): 1 | 2 {
+    const turns = openCodeCodec.encode(messages)
+    const start = findRawTailStartIndex(turns, 3, 2)
+    const twoUserTail = openCodeCodec.estimateTurns(turns.slice(start))
+    const target = targetTokens ?? Math.floor((contextLimit * targetPercent) / 100)
+    return twoUserTail > target ? 1 : 2
+}
 
 export function buildBoundaryContextPlan(
     messages: WithParts[],
@@ -38,7 +61,12 @@ export function buildBoundaryContextPlan(
 }
 
 export function applyBoundaryContextPlan(messages: WithParts[], plan: BoundaryContextPlan): void {
-    const transformed = transformTurns(openCodeCodec.encode(messages), plan.rawTailStartIndex, plan, openCodeSpec)
+    const transformed = transformTurns(
+        openCodeCodec.encode(messages),
+        plan.rawTailStartIndex,
+        plan,
+        openCodeSpec,
+    )
     replaceMessages(messages, openCodeCodec.decode(transformed, messages))
 }
 
@@ -47,7 +75,12 @@ export function applyBoundaryPlanSnapshot(
     snapshot: BoundaryPlanSnapshot,
     options: ReplayOptions = {},
 ): boolean {
-    const replayed = replayPlanSnapshot(openCodeCodec.encode(messages), snapshot, openCodeSpec, options)
+    const replayed = replayPlanSnapshot(
+        openCodeCodec.encode(messages),
+        snapshot,
+        openCodeSpec,
+        options,
+    )
     if (!replayed) return false
     replaceMessages(messages, openCodeCodec.decode(replayed, messages))
     return true
@@ -55,17 +88,30 @@ export function applyBoundaryPlanSnapshot(
 
 // Core snapshots carry the id-based rangeHash; the OpenCode layer adds a
 // content-addressed prefix identity so forked sessions can inherit the plan.
-export function toBoundaryPlanSnapshot(plan: BoundaryContextPlan, messages: WithParts[]): BoundaryPlanSnapshot {
-    if (plan.rawTailItemBoundary !== undefined) return toPlanSnapshot(plan)
+export function toBoundaryPlanSnapshot(
+    plan: BoundaryContextPlan,
+    messages: WithParts[],
+): BoundaryPlanSnapshot {
+    const snapshot = {
+        ...toPlanSnapshot(plan),
+        ...(messages.some(isSyndicatePluginInjection)
+            ? { pluginInjectionPruning: true as const }
+            : {}),
+    }
+    if (plan.rawTailItemBoundary !== undefined) return snapshot
     const prefix = messages.slice(0, plan.rawTailStartIndex)
     return {
-        ...toPlanSnapshot(plan),
+        ...snapshot,
         prefixFingerprint: boundaryRangeHash(prefix),
         compactedMessageCount: prefix.length,
     }
 }
 
-export function storeBoundaryPlan(state: SessionState, plan: BoundaryContextPlan, messages: WithParts[]): void {
+export function storeBoundaryPlan(
+    state: SessionState,
+    plan: BoundaryContextPlan,
+    messages: WithParts[],
+): void {
     state.boundary.activePlan = toBoundaryPlanSnapshot(plan, messages)
 }
 
@@ -83,8 +129,10 @@ export async function findMatchingBoundaryPlan(
     for (const plan of plans) {
         if (plan.rawTailItemBoundary !== undefined) continue
         const compactedCount = plan.compactedMessageCount
-        if (!plan.prefixFingerprint || !compactedCount || compactedCount >= messages.length) continue
-        const hash = hashes.get(compactedCount) ?? boundaryRangeHash(messages.slice(0, compactedCount))
+        if (!plan.prefixFingerprint || !compactedCount || compactedCount >= messages.length)
+            continue
+        const hash =
+            hashes.get(compactedCount) ?? boundaryRangeHash(messages.slice(0, compactedCount))
         hashes.set(compactedCount, hash)
         if (hash !== plan.prefixFingerprint) continue
         if (!existsSync(join(directory, plan.transcriptRelativePath))) continue
@@ -103,7 +151,11 @@ export async function writeBoundaryTranscript(
     plan: BoundaryContextPlan,
     logger: Logger,
 ): Promise<void> {
-    await writeTranscript(plan, { transcripts: createTranscriptStore(directory), logger, codec: openCodeCodec })
+    await writeTranscript(plan, {
+        transcripts: createTranscriptStore(directory),
+        logger,
+        codec: openCodeCodec,
+    })
 }
 
 function replaceMessages(messages: WithParts[], next: WithParts[]): void {

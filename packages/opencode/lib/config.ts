@@ -42,6 +42,8 @@ type Permission = "ask" | "allow" | "deny"
 
 export type CompactionOverride = Partial<Omit<CompactionConfig, "custom">> & {
     custom?: Partial<CompactionConfig["custom"]>
+    /** provider/model for scratch summaries; null restores the active chat model. */
+    summaryModel?: string | null
     /** null clears an inherited absolute budget and restores percentage behavior. */
     triggerTokens?: number | null
     targetTokens?: number | null
@@ -52,6 +54,7 @@ export type ProviderCompactionOverride = CompactionOverride & {
 }
 
 export type ScopedCompactionConfig = CompactionConfig & {
+    summaryModel?: string | null
     triggerTokens?: number | null
     targetTokens?: number | null
     providers?: Record<string, ProviderCompactionOverride>
@@ -92,6 +95,7 @@ export const VALID_CONFIG_KEYS = new Set([
     "compaction.automatic",
     "compaction.preset",
     "compaction.summaryEffort",
+    "compaction.summaryModel",
     "compaction.triggerTokens",
     "compaction.targetTokens",
     "compaction.custom",
@@ -196,6 +200,7 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                         "automatic",
                         "preset",
                         "summaryEffort",
+                        "summaryModel",
                         "custom",
                         "triggerTokens",
                         "targetTokens",
@@ -292,6 +297,18 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                     key: "compaction.summaryEffort",
                     expected: '"inherit" | "low" | "medium" | "high" | "max" | "off"',
                     actual: JSON.stringify(compaction.summaryEffort),
+                })
+            }
+            if (
+                compaction.summaryModel !== undefined &&
+                compaction.summaryModel !== null &&
+                (typeof compaction.summaryModel !== "string" ||
+                    !/^[^/\s]+\/[^/\s][^\s]*$/.test(compaction.summaryModel))
+            ) {
+                errors.push({
+                    key: "compaction.summaryModel",
+                    expected: '"provider/model-id" or null',
+                    actual: JSON.stringify(compaction.summaryModel),
                 })
             }
 
@@ -677,6 +694,14 @@ export function mergeCompaction(
         automatic: override.automatic ?? base.automatic,
         preset: normalizePreset(override.preset ?? base.preset),
         summaryEffort: normalizeSummaryEffort(override.summaryEffort ?? base.summaryEffort),
+        ...(base.summaryModel !== undefined || override.summaryModel !== undefined
+            ? {
+                  summaryModel:
+                      override.summaryModel !== undefined
+                          ? override.summaryModel
+                          : base.summaryModel,
+              }
+            : {}),
         custom: normalizeCompactionCustom({
             ...base.custom,
             ...(override.custom ?? {}),
@@ -783,6 +808,9 @@ function deepCloneConfig(config: PluginConfig): PluginConfig {
             automatic: config.compaction.automatic,
             preset: config.compaction.preset,
             summaryEffort: config.compaction.summaryEffort,
+            ...(config.compaction.summaryModel !== undefined
+                ? { summaryModel: config.compaction.summaryModel }
+                : {}),
             custom: { ...config.compaction.custom },
             ...(config.compaction.triggerTokens !== undefined
                 ? { triggerTokens: config.compaction.triggerTokens }

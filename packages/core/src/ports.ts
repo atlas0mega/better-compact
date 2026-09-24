@@ -12,6 +12,8 @@ export interface Logger {
 // scheduler validates and may still discard a non-null result.
 export interface Summarizer {
     complete(job: BoundarySummaryJob): Promise<string | null>
+    /** One model call returns separately keyed summaries for a group of turns. */
+    completeBatch?(jobs: BoundarySummaryJob[]): Promise<Record<string, string> | null>
 }
 
 export interface TranscriptStore {

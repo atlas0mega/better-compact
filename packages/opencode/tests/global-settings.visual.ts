@@ -36,7 +36,8 @@ test("global compaction save preserves JSONC comments and unrelated settings", a
   "debug": true,
   "compaction": {
     // preserve profile notes
-    "preset": "light"
+    "preset": "light",
+    "summaryModel": "openai/gpt-6-luna"
   }
 }
 `,
@@ -71,6 +72,7 @@ test("global compaction save preserves JSONC comments and unrelated settings", a
         automatic: false,
         preset: "custom",
         summaryEffort: "high",
+        summaryModel: "openai/gpt-6-luna",
         custom: {
             triggerPercent: 80,
             targetPercent: 30,

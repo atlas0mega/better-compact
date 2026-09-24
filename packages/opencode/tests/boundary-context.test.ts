@@ -3,13 +3,21 @@ import test from "node:test"
 import { mkdtempSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { createEngine, formatPrefixSummary, type PlanSnapshot } from "@better-compact/core"
+import {
+    createEngine,
+    formatPrefixSummary,
+    resolveCompactionProfile,
+    type PlanSnapshot,
+} from "@better-compact/core"
 import { openCodeCodec, openCodeConventions, openCodeSpec } from "../lib/codec"
+import { getConfig } from "../lib/config"
 import { Logger } from "../lib/logger"
-import type { WithParts } from "../lib/state"
+import { createSessionState, type WithParts } from "../lib/state"
 import {
     applyBoundaryPlanSnapshot,
+    adaptiveTailUserTurns,
     buildBoundaryContextPlan,
+    processBoundaryTransform,
     toBoundaryPlanSnapshot,
     writeBoundaryTranscript,
 } from "../lib/boundary"
@@ -82,6 +90,438 @@ test("ignored Better Compact messages do not count as protected user turns", () 
 
     assert.ok(plan)
     assert.equal(plan.rawTailStartMessageId, "msg-user-2")
+})
+
+test("Syndicate plugin prompts obey tool retention while real user instructions remain protected", async () => {
+    const suffix = "\n\n[plugin-injection:12345678-1234-4234-8234-123456789abc]"
+    const oldText = `[teams-md] old injected payload ${"old plugin data ".repeat(1_000)}${suffix}`
+    const recentText = `Recent plugin alert ${"new plugin data ".repeat(1_000)}${suffix}`
+    const messages = [
+        message(
+            "human-old",
+            "user",
+            [textPart("human-old", "Keep this original instruction exactly.")],
+            1,
+        ),
+        message("assistant-old", "assistant", [textPart("assistant-old", "Older answer")], 2),
+        message("plugin-old", "user", [textPart("plugin-old", oldText)], 3),
+        message("plugin-recent", "user", [textPart("plugin-recent", recentText)], 4),
+        message(
+            "assistant-middle",
+            "assistant",
+            [textPart("assistant-middle", "Middle answer")],
+            5,
+        ),
+        message("human-middle", "user", [textPart("human-middle", "Another real request")], 6),
+        message(
+            "assistant-latest",
+            "assistant",
+            [textPart("assistant-latest", "Latest answer")],
+            7,
+        ),
+        message("human-current", "user", [textPart("human-current", "Current task")], 8),
+    ]
+    const before = structuredClone(messages)
+    const recentCost = openCodeCodec.estimateTurns(openCodeCodec.encode([messages[3]]))
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 200_000,
+        force: true,
+        recentToolResultBudgetTokens: recentCost,
+    })
+    assert.ok(plan)
+    assert.equal(plan.rawTailStartMessageId, "human-middle")
+    assert.ok(plan.preservedToolCallIds.includes("plugin-recent"))
+    assert.ok(!plan.preservedToolCallIds.includes("plugin-old"))
+    assert.ok(!formatPrefixSummary(openCodeCodec.encode(messages.slice(0, 5))).includes(oldText))
+    assert.ok(
+        formatPrefixSummary(openCodeCodec.encode(messages.slice(0, 5))).includes(
+            "Keep this original instruction exactly.",
+        ),
+    )
+
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-plugin-injection-"))
+    await writeBoundaryTranscript(directory, plan, new Logger(false))
+    const transcript = readFileSync(join(directory, plan.transcript.relativePath), "utf8")
+    assert.ok(transcript.includes("old plugin data ".repeat(1_000)))
+    assert.ok(transcript.includes("[plugin-injection:12345678-1234-4234-8234-123456789abc]"))
+    const replayed = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(replayed, toBoundaryPlanSnapshot(plan, messages), {
+            allowRegrown: true,
+        }),
+    )
+    assert.deepEqual(messages, before)
+    assert.equal(replayed.find((item) => item.info.id === "plugin-old")?.info.role, "user")
+    const oldReplay = replayed.find((item) => item.info.id === "plugin-old")?.parts[0]
+    assert.ok(oldReplay?.type === "text")
+    assert.match(oldReplay.text, /\[tool:plugin-injection\] Historical generated prompt pruned/)
+    assert.ok(!oldReplay.text.includes("old plugin data"))
+    const recentReplay = replayed.find((item) => item.info.id === "plugin-recent")?.parts[0]
+    assert.ok(recentReplay?.type === "text")
+    assert.equal(recentReplay.text, recentText)
+    assert.equal(replayed.find((item) => item.info.id === "human-old")?.parts[0]?.type, "text")
+
+    const aggressive = buildBoundaryContextPlan(messages, {
+        contextLimit: 200_000,
+        force: true,
+        recentToolResultBudgetTokens: 0,
+    })
+    assert.ok(aggressive)
+    const aggressiveReplay = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(aggressiveReplay, toBoundaryPlanSnapshot(aggressive, messages), {
+            allowRegrown: true,
+        }),
+    )
+    const recentStub = aggressiveReplay.find((item) => item.info.id === "plugin-recent")?.parts[0]
+    assert.ok(recentStub?.type === "text")
+    assert.match(recentStub.text, /\[tool:plugin-injection\]/)
+
+    // A replacement plan must not resurrect generated prompts the previous
+    // virtual context had already pruned, even with a larger tool budget.
+    const replacement = buildBoundaryContextPlan(messages, {
+        contextLimit: 200_000,
+        force: true,
+        recentToolResultBudgetTokens: 100_000,
+        priorPlan: toBoundaryPlanSnapshot(aggressive, messages),
+    })
+    assert.ok(replacement)
+    assert.ok(!replacement.preservedToolCallIds.includes("plugin-old"))
+    assert.ok(!replacement.preservedToolCallIds.includes("plugin-recent"))
+    const replacementReplay = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(
+            replacementReplay,
+            toBoundaryPlanSnapshot(replacement, messages),
+            { allowRegrown: true },
+        ),
+    )
+    for (const id of ["plugin-old", "plugin-recent"]) {
+        const part = replacementReplay.find((item) => item.info.id === id)?.parts[0]
+        assert.ok(part?.type === "text")
+        assert.match(part.text, /\[tool:plugin-injection\]/)
+    }
+
+    // Old snapshots could have included those same injections verbatim in a
+    // deterministic prefix summary. Replay cleans them without dropping the
+    // actual human instruction or changing the stored raw transcript.
+    const legacyTurns = openCodeCodec
+        .encode(messages.slice(0, 5))
+        .map((turn) =>
+            turn.prunableToolLike ? { ...turn, prunableToolLike: false, ephemeral: false } : turn,
+        )
+    const legacySummary = formatPrefixSummary(legacyTurns)
+    assert.ok(legacySummary.includes(oldText))
+    const legacyReplay = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(
+            legacyReplay,
+            {
+                ...toBoundaryPlanSnapshot(plan, messages),
+                requiresCustomCompaction: true,
+                prefixSummary: legacySummary,
+            },
+            { allowRegrown: true },
+        ),
+    )
+    const cleaned = legacyReplay.find((item) =>
+        item.info.id.startsWith("msg_better_compact_summary_"),
+    )
+    const cleanedText = cleaned?.parts[0]
+    assert.ok(cleanedText?.type === "text")
+    assert.ok(!cleanedText.text.includes(oldText))
+    assert.ok(!cleanedText.text.includes(recentText))
+    assert.ok(cleanedText.text.includes("Keep this original instruction exactly."))
+})
+
+test("an older cached plan containing plugin prompts replans below trigger once", async () => {
+    const suffix = "\n\n[plugin-injection:12345678-1234-4234-8234-123456789abc]"
+    const messages = [
+        message("u-old", "user", [textPart("u-old", "Old human instruction")], 1),
+        message(
+            "plugin-old",
+            "user",
+            [textPart("plugin-old", `Old injected content ${"x".repeat(10_000)}${suffix}`)],
+            2,
+        ),
+        message("a-old", "assistant", [textPart("a-old", "Old answer")], 3),
+        message("u-middle", "user", [textPart("u-middle", "Another human instruction")], 4),
+        message("a-middle", "assistant", [textPart("a-middle", "Second answer")], 5),
+        message("u-current", "user", [textPart("u-current", "Current task")], 6),
+    ]
+    const original = structuredClone(messages)
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-migrate-plugin-plan-"))
+    const config = getConfig({ directory, worktree: directory, client: {} } as never, {
+        warnings: false,
+    })
+    const profile = resolveCompactionProfile(config)
+    const oldPlan = buildBoundaryContextPlan(messages, {
+        contextLimit: 200_000,
+        force: true,
+        triggerRatio: profile.triggerPercent / 100,
+        targetRatio: profile.targetPercent / 100,
+        prefixSummaryAllowed: profile.prefixSummary,
+        collapsePercent: profile.collapsePercent,
+        recentToolResultBudgetTokens: 0,
+    })
+    assert.ok(oldPlan)
+    assert.ok(oldPlan.afterPruneTokens < oldPlan.triggerTokens)
+
+    const state = createSessionState()
+    state.sessionId = sessionID
+    state.modelContextLimit = 200_000
+    state.boundary.activePlan = {
+        ...toBoundaryPlanSnapshot(oldPlan, messages),
+        pluginInjectionPruning: undefined,
+    }
+    const logger = new Logger(false)
+    const replanned = await processBoundaryTransform({
+        state,
+        logger,
+        config,
+        directory,
+        messages,
+        summariesAllowed: false,
+    })
+    assert.ok(replanned)
+    assert.equal(state.boundary.activePlan?.pluginInjectionPruning, true)
+    const stub = messages.find((item) => item.info.id === "plugin-old")?.parts[0]
+    assert.ok(stub?.type === "text")
+    assert.match(stub.text, /\[tool:plugin-injection\]/)
+
+    const repeated = structuredClone(original)
+    const replayed = await processBoundaryTransform({
+        state,
+        logger,
+        config,
+        directory,
+        messages: repeated,
+        summariesAllowed: false,
+    })
+    assert.equal(replayed, null)
+    assert.deepEqual(repeated, messages)
+})
+
+test("sparse user turns advance the raw boundary without splitting or losing messages", async () => {
+    const messages = [
+        message("u-old", "user", [textPart("u-old", "Keep the original instruction")], 1),
+        message("a-old", "assistant", [textPart("a-old", "Earlier completed work")], 2),
+        message("u-loop", "user", [textPart("u-loop", "Start a long agent task")], 3),
+        ...Array.from({ length: 60 }, (_, index) =>
+            message(
+                `loop-${index}`,
+                "assistant",
+                [
+                    textPart(`loop-${index}`, `Step ${index}: updated source file ${index}`),
+                    {
+                        id: `reason-${index}`,
+                        sessionID,
+                        messageID: `loop-${index}`,
+                        type: "reasoning" as const,
+                        text: `investigated step ${index} ${"detail ".repeat(500)}`,
+                    },
+                ],
+                index + 4,
+            ),
+        ),
+        message("u-current", "user", [textPart("u-current", "Continue this same task")], 70),
+    ]
+    const original = structuredClone(messages)
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-agent-loop-"))
+    const config = getConfig({ directory, worktree: directory, client: {} } as never, {
+        warnings: false,
+    })
+    config.compaction.preset = "custom"
+    config.compaction.custom = {
+        ...config.compaction.custom,
+        triggerPercent: 60,
+        targetPercent: 22,
+    }
+    assert.equal(adaptiveTailUserTurns(messages, 100_000, 22), 1)
+    assert.equal(
+        adaptiveTailUserTurns(messages.slice(0, 4).concat(messages.at(-1)!), 100_000, 22),
+        2,
+    )
+    const profile = resolveCompactionProfile(config)
+    const oldPlan = buildBoundaryContextPlan(messages, {
+        contextLimit: 100_000,
+        force: true,
+        triggerRatio: 0.6,
+        targetRatio: 0.22,
+        prefixSummaryAllowed: profile.prefixSummary,
+        collapsePercent: profile.collapsePercent,
+    })
+    assert.ok(oldPlan)
+    assert.equal(oldPlan.rawTailStartMessageId, "u-loop")
+    const state = createSessionState()
+    state.sessionId = sessionID
+    state.modelContextLimit = 100_000
+    state.boundary.activePlan = toBoundaryPlanSnapshot(oldPlan, messages)
+    const logger = new Logger(false)
+    const replanned = await processBoundaryTransform({
+        state,
+        logger,
+        config,
+        directory,
+        messages,
+        summariesAllowed: false,
+    })
+    assert.ok(replanned)
+    assert.equal(replanned.rawTailStartMessageId, "u-current")
+    assert.equal(replanned.rawTailItemBoundary, undefined)
+    assert.equal(state.boundary.activePlan?.minTailUserTurns, 1)
+    assert.deepEqual(
+        replanned.transcript.messageIds,
+        original.slice(0, -1).map((item) => item.info.id),
+    )
+    assert.equal(messages.at(-1)?.parts[0]?.type, "text")
+    assert.ok(
+        replanned.prefixSummary?.includes("Start a long agent task") ||
+            messages.some(
+                (item) =>
+                    item.info.id === "u-loop" &&
+                    item.parts.some(
+                        (part) => part.type === "text" && part.text === "Start a long agent task",
+                    ),
+            ),
+    )
+    const repeated = structuredClone(original)
+    assert.equal(
+        await processBoundaryTransform({
+            state,
+            logger,
+            config,
+            directory,
+            messages: repeated,
+            summariesAllowed: false,
+        }),
+        null,
+    )
+    assert.deepEqual(repeated, messages)
+})
+
+test("an older deterministic prefix gets one bounded synthesis attempt below trigger", async () => {
+    const messages = [
+        message("user-old", "user", [textPart("user-old", "Keep this original requirement")], 1),
+        ...Array.from({ length: 20 }, (_, index) =>
+            message(
+                `assistant-${index}`,
+                "assistant",
+                [
+                    textPart(
+                        `assistant-${index}`,
+                        `Finished step ${index}: ${"implementation detail ".repeat(40)}`,
+                    ),
+                ],
+                index + 2,
+            ),
+        ),
+        message("user-middle", "user", [textPart("user-middle", "Continue")], 25),
+        message(
+            "assistant-tail",
+            "assistant",
+            [textPart("assistant-tail", "Most recent work")],
+            26,
+        ),
+        message("user-current", "user", [textPart("user-current", "Current task")], 27),
+    ]
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-old-prefix-"))
+    const config = getConfig({ directory, worktree: directory, client: {} } as never, {
+        warnings: false,
+    })
+    config.compaction.preset = "custom"
+    config.compaction.custom = {
+        ...config.compaction.custom,
+        triggerPercent: 85,
+        targetPercent: 22,
+        prefixSummary: true,
+    }
+    config.compaction.triggerTokens = 175_000
+    config.compaction.targetTokens = 1_000
+    const minTailUserTurns = adaptiveTailUserTurns(messages, 200_000, 22, 1_000)
+    const oldPlan = buildBoundaryContextPlan(messages, {
+        contextLimit: 200_000,
+        force: true,
+        triggerTokens: 175_000,
+        targetTokens: 1_000,
+        minTailUserTurns,
+        prefixSummaryAllowed: true,
+    })
+    assert.ok(oldPlan)
+    const oldPrefix = formatPrefixSummary(openCodeCodec.encode(messages.slice(0, -1)))
+    assert.ok((oldPrefix.match(/^- Resume from prior assistant progress: /gm)?.length ?? 0) >= 12)
+    const oldSnapshot = {
+        ...toBoundaryPlanSnapshot(oldPlan, messages),
+        requiresCustomCompaction: true,
+        prefixSummary: oldPrefix,
+        afterPruneTokens: 5_000,
+        prefixChunkAttempted: true as const,
+        prefixChunkVersion: 1,
+    }
+    const state = createSessionState()
+    state.sessionId = sessionID
+    state.modelContextLimit = 200_000
+    state.boundary.activePlan = oldSnapshot
+    const logger = new Logger(false)
+    let calls = 0
+    const first = structuredClone(messages)
+    assert.ok(
+        await processBoundaryTransform({
+            state,
+            logger,
+            config,
+            directory,
+            messages: first,
+            summariesAllowed: true,
+            summarizePrefix: async () => {
+                calls++
+                return null
+            },
+        }),
+    )
+    assert.equal(calls, 1)
+    assert.equal(state.boundary.activePlan?.prefixChunkAttempted, true)
+    assert.equal(state.boundary.activePlan?.prefixChunkVersion, 2)
+    const replay = structuredClone(messages)
+    assert.equal(
+        await processBoundaryTransform({
+            state,
+            logger,
+            config,
+            directory,
+            messages: replay,
+            summariesAllowed: true,
+            summarizePrefix: async () => {
+                calls++
+                return null
+            },
+        }),
+        null,
+    )
+    assert.equal(calls, 1)
+    assert.deepEqual(replay, first)
+    // The same oversized saved range may be retried if its summary model changes.
+    state.boundary.activePlan = {
+        ...oldSnapshot,
+        prefixChunkVersion: 2,
+        prefixChunkModel: "inherit",
+    }
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    const changedModel = structuredClone(messages)
+    await processBoundaryTransform({
+        state,
+        logger,
+        config,
+        directory,
+        messages: changedModel,
+        summariesAllowed: true,
+        summarizePrefix: async () => {
+            calls++
+            return null
+        },
+    })
+    assert.equal(calls, 2)
+    assert.equal(state.boundary.activePlan?.prefixChunkModel, "openai/gpt-6-luna")
 })
 
 test("prefix summary keeps only the latest goal continuation even when objectives change", async () => {

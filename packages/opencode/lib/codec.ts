@@ -14,6 +14,7 @@ import {
     type Turn,
 } from "@better-compact/core"
 import { estimateOpenCodeMessages, estimateOpenCodeToolPart } from "./context-estimate"
+import { isSyndicatePluginInjection } from "./messages/injection"
 import type { WithParts } from "./state"
 
 type MessagePart = WithParts["parts"][number]
@@ -35,14 +36,18 @@ function messageOf(turn: Turn): WithParts {
 
 export const openCodeCodec: Codec<WithParts> = {
     encode(messages) {
-        return messages.map((message) => ({
-            key: message.info.id,
-            stamp: message.info.time.created,
-            role: message.info.role,
-            ephemeral: isIgnoredNotification(message),
-            handle: message,
-            items: message.parts.map(encodePart),
-        }))
+        return messages.map((message) => {
+            const injected = isSyndicatePluginInjection(message)
+            return {
+                key: message.info.id,
+                stamp: message.info.time.created,
+                role: message.info.role,
+                ephemeral: injected || isIgnoredNotification(message),
+                prunableToolLike: injected,
+                handle: message,
+                items: message.parts.map(encodePart),
+            }
+        })
     },
 
     decode(turns, messages) {

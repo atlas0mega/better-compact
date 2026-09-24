@@ -58,6 +58,28 @@ test("reasoning effort inherits independently at every scope", () => {
     assert.equal(resolveModelConfig(base, "other", "other").compaction.summaryEffort, "medium")
 })
 
+test("scratch summary model inherits and can be overridden or cleared independently", () => {
+    const base = config()
+    base.compaction.summaryModel = "openai/gpt-6-luna"
+    base.compaction.providers!.runpod!.summaryModel = "google/gemini-2.5-flash"
+    base.compaction.providers!.runpod!.models!["qwen/3.8"]!.summaryModel = "openai/gpt-6-sol"
+    base.compaction.providers!.runpod!.models!.percent!.summaryModel = null
+    assert.equal(
+        resolveModelConfig(base, "runpod", "qwen/3.8").compaction.summaryModel,
+        "openai/gpt-6-sol",
+    )
+    assert.equal(
+        resolveModelConfig(base, "runpod", "other").compaction.summaryModel,
+        "google/gemini-2.5-flash",
+    )
+    assert.equal(resolveModelConfig(base, "runpod", "percent").compaction.summaryModel, null)
+    assert.equal(
+        resolveModelConfig(base, "other", "other").compaction.summaryModel,
+        "openai/gpt-6-luna",
+    )
+    assert.equal(base.compaction.summaryModel, "openai/gpt-6-luna")
+})
+
 test("unknown model inherits provider; unknown provider and missing identity inherit global", () => {
     const base = config()
     assert.equal(resolveModelConfig(base, "runpod", "other").compaction.triggerTokens, 200000)
@@ -107,6 +129,11 @@ test("false and concurrent model resolution do not leak across sessions", async 
 })
 
 test("validation supports exact IDs, partial overrides and null budgets", () => {
+    const base = config()
+    base.compaction.summaryModel = "openai/gpt-6-luna"
+    base.compaction.providers!.runpod!.models!.percent!.summaryModel = null
+    assert.deepEqual(getInvalidConfigKeys(base), [])
+    assert.deepEqual(validateConfigTypes(base), [])
     assert.deepEqual(getInvalidConfigKeys(config()), [])
     assert.deepEqual(validateConfigTypes(config()), [])
 })
@@ -133,4 +160,19 @@ test("validation rejects malformed maps and unsafe absolute budgets", () => {
         }),
         ["compaction.providers.p.id.models.m/id.typo"],
     )
+})
+
+test("validation rejects malformed scratch summary model IDs at every scope", () => {
+    for (const summaryModel of ["openai", "/model", "openai/", "openai/model name", 7, false, {}]) {
+        assert.ok(
+            validateConfigTypes({ compaction: { summaryModel } }).some(
+                (error) => error.key === "compaction.summaryModel",
+            ),
+        )
+        assert.ok(
+            validateConfigTypes({
+                compaction: { providers: { p: { models: { m: { summaryModel } } } } },
+            }).some((error) => error.key === "compaction.providers.p.models.m.summaryModel"),
+        )
+    }
 })

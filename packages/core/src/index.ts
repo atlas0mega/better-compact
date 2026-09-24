@@ -17,6 +17,8 @@ export type { EnginePorts, Logger, PlanStore, Summarizer, TranscriptStore } from
 export {
     assistantRunsStage,
     formatPrefixSummary,
+    prefixUserMessages,
+    findRawTailStartIndex,
     findBudgetTailStartIndex,
     primaryToolTarget,
     purgeErrorInputsStage,
@@ -42,6 +44,8 @@ export {
 export { formatTranscript, writeTranscript } from "./transcript"
 export {
     createSummaryScheduler,
+    formatSummarySections,
+    SUMMARY_SECTION_HEADERS,
     type SummarizeJobsInput,
     type SummarizeProgressEvent,
     type SummaryScheduler,

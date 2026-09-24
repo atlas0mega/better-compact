@@ -5,6 +5,7 @@ import {
     buildPlan,
     countTokens,
     createEngine,
+    createSummaryScheduler,
     reasoningStage,
     replayPlanSnapshot,
     purgeErrorInputsStage,
@@ -482,6 +483,115 @@ test("applied output matches the simulated plan when assistant runs are summariz
     )
 
     assert.ok(transformed.some((item) => item.key === "msg-assistant-tail"))
+})
+
+test("separate grouped calls rebuild and replay summaries in original turn order", async () => {
+    const turns = [
+        turn("msg-user-1", "user", [textItem("msg-user-1", "First request")], 1),
+        turn(
+            "msg-assistant-1",
+            "assistant",
+            [textItem("msg-assistant-1", "old first ".repeat(3_000))],
+            2,
+        ),
+        turn("msg-user-2", "user", [textItem("msg-user-2", "Second request")], 3),
+        turn(
+            "msg-assistant-2",
+            "assistant",
+            [textItem("msg-assistant-2", "old second ".repeat(3_000))],
+            4,
+        ),
+        turn("msg-user-3", "user", [textItem("msg-user-3", "Third request")], 5),
+        turn(
+            "msg-assistant-3",
+            "assistant",
+            [textItem("msg-assistant-3", "old third ".repeat(3_000))],
+            6,
+        ),
+        turn("msg-user-4", "user", [textItem("msg-user-4", "Last request")], 7),
+        turn("msg-assistant-4", "assistant", [textItem("msg-assistant-4", "recent reply")], 8),
+        turn("msg-user-5", "user", [textItem("msg-user-5", "Latest request")], 9),
+    ]
+    const original = JSON.stringify(turns)
+    const options = inputs({
+        contextLimit: 50_000,
+        targetRatio: 0.01,
+        force: true,
+        recentToolResultBudgetTokens: 0,
+    })
+    const initial = buildPlan(turns, options, spec)
+    assert.ok(initial)
+    assert.ok(initial.summaryJobs.length >= 3)
+
+    const calls: string[][] = []
+    const scheduler = createSummaryScheduler({ info() {}, debug() {}, warn() {}, error() {} })
+    const summaries = await scheduler.summarize({
+        sessionKey,
+        jobs: initial.summaryJobs,
+        concurrency: 2,
+        maxCalls: 2,
+        targetBatchTokens: 1,
+        maxJobsPerBatch: 2,
+        summarizer: {
+            complete: async () => {
+                throw new Error("Must use grouped transport")
+            },
+            completeBatch: async (batch) => {
+                calls.push(batch.map((job) => job.key))
+                return Object.fromEntries(
+                    batch
+                        .filter((job) => job.rangeStartMessageId !== "msg-assistant-2")
+                        .map((job) => [
+                            job.key,
+                            [
+                                "## Decisions",
+                                `- Accepted ${job.rangeStartMessageId} and kept its decisions.`,
+                                "## Files & Symbols",
+                                "- src/feature.ts",
+                                "## Errors (verbatim)",
+                                "- (none)",
+                                "## What failed and why",
+                                "- (none)",
+                                "## Constraints",
+                                "- Preserve the user request.",
+                                "## Next step",
+                                "- Continue the work.",
+                            ].join("\n"),
+                        ]),
+                )
+            },
+        },
+    })
+    assert.equal(calls.length, 2)
+    assert.ok(calls.some((batch) => batch.length === 2))
+    assert.equal(Object.keys(summaries).length, 2)
+    const rebuilt = buildPlan(
+        turns,
+        { ...options, assistantSummaries: summaries, priorPlan: toPlanSnapshot(initial) },
+        spec,
+    )
+    assert.ok(rebuilt)
+    const transformed = transformTurns(turns, rebuilt.rawTailStartIndex, rebuilt, spec)
+    const replay = replayPlanSnapshot(turns, toPlanSnapshot(rebuilt), spec, { allowRegrown: true })
+    assert.ok(replay)
+    assert.equal(JSON.stringify(replay), JSON.stringify(transformed))
+
+    for (const accepted of initial.summaryJobs.filter((job) => summaries[job.key])) {
+        const position = transformed.findIndex((item) => item.key === accepted.rangeStartMessageId)
+        assert.ok(position >= 0)
+        const content = syntheticTextOf(transformed[position])
+        assert.match(content, new RegExp(`Accepted ${accepted.rangeStartMessageId}`))
+        for (const other of initial.summaryJobs.filter(
+            (job) => job.key !== accepted.key && summaries[job.key],
+        )) {
+            assert.doesNotMatch(content, new RegExp(`Accepted ${other.rangeStartMessageId}`))
+        }
+    }
+    const skipped = initial.summaryJobs.find((job) => !summaries[job.key])
+    assert.ok(skipped)
+    const fallback = transformed.find((item) => item.key === skipped.rangeStartMessageId)
+    assert.match(syntheticTextOf(fallback), /old (first|second|third)/)
+    assert.equal(JSON.stringify(turns), original)
 })
 
 test("prefix summary fires when pruning cannot get the applied output below trigger", () => {
@@ -1249,6 +1359,53 @@ test("engine does not replay thresholds cached for another model", async () => {
     assert.equal(saved, null)
 })
 
+test("engine rebuilds a cached plan when prefix-summary or collapse settings change", async () => {
+    const turns = buildMultiRunConversation()
+    const original = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 40_000,
+            recentToolResultBudgetTokens: 0,
+            prefixSummaryAllowed: true,
+            collapsePercent: 10,
+        }),
+        spec,
+    )
+    assert.ok(original)
+    let snapshot = toPlanSnapshot(original)
+    const engine = createEngine(spec, {
+        transcripts: {
+            citablePath: (key, hash) => `transcripts/${key}/${hash}.md`,
+            write: async () => ({}),
+        },
+        plans: {
+            load: () => snapshot,
+            save: (_key, value) => {
+                if (value) snapshot = value
+            },
+        },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    })
+    const request = {
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        collapsePercent: 10,
+    }
+    assert.equal((await engine.process(request)).outcome, "replayed")
+
+    assert.equal((await engine.process({ ...request, collapsePercent: 75 })).outcome, "planned")
+    assert.equal(snapshot.collapsePercent, 75)
+    assert.equal(
+        (await engine.process({ ...request, collapsePercent: 75, prefixSummaryAllowed: false }))
+            .outcome,
+        "planned",
+    )
+    assert.equal(snapshot.prefixSummaryAllowed, false)
+})
+
 test("engine keeps the deterministic plan when summary scheduling rejects", async () => {
     const turns = buildMultiRunConversation()
     const planInputs = inputs({ contextLimit: 40_000, recentToolResultBudgetTokens: 0 })
@@ -1296,6 +1453,175 @@ test("engine keeps the deterministic plan when summary scheduling rejects", asyn
     )
     assert.ok(saved)
     assert.ok(warnings.includes("Summary scheduling failed; using deterministic fallback"))
+})
+
+test("verbose keyed turn summaries cannot enlarge a saved plan", async () => {
+    const turns = buildMultiRunConversation()
+    const planInputs = inputs({
+        contextLimit: 40_000,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: false,
+    })
+    const baseline = buildPlan(turns, planInputs, spec)
+    assert.ok(baseline?.summaryJobs.length)
+    let snapshot: PlanSnapshot | null = null
+    const engine = createEngine(spec, {
+        transcripts: { citablePath: planInputs.citablePath, write: async () => ({}) },
+        plans: {
+            load: () => null,
+            save: (_key, plan) => {
+                snapshot = plan
+            },
+        },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    })
+    const result = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: false,
+        summarize: async (jobs) =>
+            Object.fromEntries(
+                jobs.map((job) => [
+                    job.key,
+                    [
+                        "## Decisions",
+                        `- ${"Rich but verbose historical detail. ".repeat(100)}`,
+                        "## Files & Symbols",
+                        "- src/file.ts",
+                        "## Errors (verbatim)",
+                        "- (none)",
+                        "## What failed and why",
+                        "- (none)",
+                        "## Constraints",
+                        "- Keep the original requirement.",
+                        "## Next step",
+                        "- Continue working.",
+                    ].join("\n"),
+                ]),
+            ),
+    })
+    assert.equal(result.outcome, "planned")
+    if (result.outcome !== "planned") return
+    assert.ok(result.plan.afterPruneTokens <= baseline.afterPruneTokens)
+    assert.deepEqual(result.plan.assistantSummaries, {})
+    assert.deepEqual(replayPlanSnapshot(turns, snapshot!, spec), result.turns)
+    assert.equal(turns[1].items[1].kind, "text")
+})
+
+test("a last-resort prefix does not schedule invisible assistant-turn summaries", async () => {
+    const turns = buildMultiRunConversation()
+    const planInputs = inputs({
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+    })
+    const baseline = buildPlan(turns, planInputs, spec)
+    assert.ok(baseline?.requiresCustomCompaction)
+    assert.equal(baseline.summaryJobs.length, 0)
+    const engine = createEngine(spec, {
+        transcripts: { citablePath: planInputs.citablePath, write: async () => ({}) },
+        plans: { load: () => null, save: () => {} },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    })
+    let calls = 0
+    const result = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        summarize: async () => {
+            calls++
+            return {}
+        },
+    })
+    assert.equal(result.outcome, "planned")
+    if (result.outcome !== "planned") return
+    assert.equal(result.plan.afterPruneTokens, baseline.afterPruneTokens)
+    assert.equal(calls, 0)
+    assert.deepEqual(result.plan.assistantSummaries, {})
+    assert.ok(result.plan.prefixSummary?.includes("First task, keep this requirement."))
+})
+
+test("a bounded prefix synthesis replaces the fallback once and replays identically", async () => {
+    const turns = buildMultiRunConversation()
+    const options = inputs({
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+    })
+    const baseline = buildPlan(turns, options, spec)
+    assert.ok(baseline?.requiresCustomCompaction)
+    const summary = [
+        "## Decisions",
+        "- Completed work in src/app.ts with the current task intact.",
+        "## Files & Symbols",
+        "- src/app.ts",
+        "## Errors (verbatim)",
+        "- (none)",
+        "## What failed and why",
+        "- (none)",
+        "## Constraints",
+        "- First task, keep this requirement.",
+        "## Next step",
+        "- Continue the latest request.",
+    ].join("\n")
+    let saved: PlanSnapshot | null = null
+    let calls = 0
+    const ports = {
+        transcripts: { citablePath: options.citablePath, write: async () => ({}) },
+        plans: {
+            load: () => saved,
+            save: (_key: string, snapshot: PlanSnapshot | null) => {
+                saved = snapshot
+            },
+        },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    }
+    const engine = createEngine(spec, ports)
+    const first = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        summarizePrefix: async () => {
+            calls++
+            return summary
+        },
+    })
+    assert.equal(first.outcome, "planned")
+    if (first.outcome !== "planned") return
+    assert.equal(calls, 1)
+    assert.ok(first.plan.afterPruneTokens < baseline.afterPruneTokens)
+    assert.equal(first.plan.prefixSummary, summary)
+    assert.deepEqual(first.plan.summaryJobs, [])
+    const replay = await engine.process({
+        sessionKey,
+        turns,
+        contextLimit: 40_000,
+        triggerTokens: 500,
+        targetTokens: 100,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        summarizePrefix: async () => {
+            calls++
+            return summary
+        },
+    })
+    assert.equal(replay.outcome, "replayed")
+    if (replay.outcome === "replayed") assert.deepEqual(replay.turns, first.turns)
+    assert.equal(calls, 1)
 })
 
 test("planner triggers when either the provider total or the raw estimate crosses the trigger", () => {

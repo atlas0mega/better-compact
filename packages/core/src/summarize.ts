@@ -1,6 +1,7 @@
 import type { CodecOps, Turn } from "./ir"
 import type { BoundarySummaryJob } from "./plan"
 import type { Logger, Summarizer } from "./ports"
+import { countTokens } from "./estimate"
 import { formatTranscript } from "./transcript"
 
 const DEFAULT_CONCURRENCY = 4
@@ -33,6 +34,13 @@ export interface SummarizeJobsInput {
     jobs: BoundarySummaryJob[]
     summarizer: Summarizer
     concurrency?: number
+    /** Batch transport only: maximum model calls in this compaction run. */
+    maxCalls?: number
+    targetBatchTokens?: number
+    maxBatchTokens?: number
+    maxJobsPerBatch?: number
+    /** Preserve a complete chunk summary or fall back; never truncate it. */
+    rejectOversized?: boolean
     onProgress?: (event: SummarizeProgressEvent) => Promise<void> | void
 }
 
@@ -73,6 +81,10 @@ export function createSummaryScheduler(
                 return {}
             }
 
+            if (input.summarizer.completeBatch && input.maxCalls) {
+                return summarizeBatches(input, input.maxCalls, now, failures, logger)
+            }
+
             const summaries: Record<string, string> = {}
             const pending = dedupeJobs(input.jobs)
             const concurrency = Math.max(
@@ -86,7 +98,15 @@ export function createSummaryScheduler(
             for (let offset = 0; offset < pending.length; offset += concurrency) {
                 const jobs = pending.slice(offset, offset + concurrency)
                 const outcomes = await Promise.all(
-                    jobs.map((job) => runJob(input.sessionKey, job, input.summarizer, logger)),
+                    jobs.map((job) =>
+                        runJob(
+                            input.sessionKey,
+                            job,
+                            input.summarizer,
+                            logger,
+                            input.rejectOversized,
+                        ),
+                    ),
                 )
 
                 for (let index = 0; index < jobs.length; index++) {
@@ -110,13 +130,7 @@ export function createSummaryScheduler(
                     })
                 }
 
-                updateFailureState(
-                    failures,
-                    input.sessionKey,
-                    outcomes.map(Boolean),
-                    now(),
-                    logger,
-                )
+                updateFailureState(failures, input.sessionKey, outcomes.map(Boolean), now(), logger)
                 if (failures.get(input.sessionKey)?.openUntil) break
             }
 
@@ -128,15 +142,133 @@ export function createSummaryScheduler(
     }
 }
 
+async function summarizeBatches(
+    input: SummarizeJobsInput,
+    available: number,
+    now: () => number,
+    failures: Map<string, FailureState>,
+    logger: Logger,
+): Promise<Record<string, string>> {
+    const pending = dedupeJobs(input.jobs)
+    const target = input.targetBatchTokens ?? 12_000
+    const hard = input.maxBatchTokens ?? 24_000
+    const maxJobs = input.maxJobsPerBatch ?? 16
+    const eligible = pending
+        .map((job) => ({ job, tokens: countTokens(job.prompt) + 80 }))
+        .filter((entry) => entry.tokens <= hard)
+    if (eligible.length === 0) return {}
+
+    const totalTokens = eligible.reduce((sum, entry) => sum + entry.tokens, 0)
+    const calls = Math.min(available, Math.max(1, Math.ceil(totalTokens / target)))
+    let slots = Math.min(eligible.length, calls * maxJobs)
+    let groups: BoundarySummaryJob[][] = []
+    while (slots > 0) {
+        const selected = Array.from(
+            { length: slots },
+            (_, index) => eligible[Math.floor(((index + 0.5) * eligible.length) / slots)],
+        )
+        if (selected.reduce((sum, entry) => sum + entry.tokens, 0) > calls * hard) {
+            slots--
+            continue
+        }
+        const batches: Array<{ jobs: BoundarySummaryJob[]; tokens: number }> = Array.from(
+            { length: calls },
+            () => ({ jobs: [], tokens: 0 }),
+        )
+        let fits = true
+        for (const entry of selected) {
+            const candidate = batches
+                .filter(
+                    (batch) => batch.tokens + entry.tokens <= hard && batch.jobs.length < maxJobs,
+                )
+                .sort((a, b) => a.tokens - b.tokens || a.jobs.length - b.jobs.length)[0]
+            if (!candidate) {
+                fits = false
+                break
+            }
+            candidate.jobs.push(entry.job)
+            candidate.tokens += entry.tokens
+        }
+        if (fits) {
+            groups = batches.filter((batch) => batch.jobs.length > 0).map((batch) => batch.jobs)
+            break
+        }
+        slots--
+    }
+    if (groups.length === 0) return {}
+    logger.info("Running grouped assistant summaries", {
+        sessionKey: input.sessionKey,
+        jobs: pending.length,
+        selected: groups.reduce((sum, group) => sum + group.length, 0),
+        calls: groups.length,
+    })
+    const summaries: Record<string, string> = {}
+    let done = 0
+    let succeeded = 0
+    let failed = 0
+    const concurrency = Math.max(
+        1,
+        Math.min(input.concurrency ?? DEFAULT_CONCURRENCY, groups.length),
+    )
+    for (let offset = 0; offset < groups.length; offset += concurrency) {
+        const current = groups.slice(offset, offset + concurrency)
+        const outcomes = await Promise.all(
+            current.map(async (group) => {
+                try {
+                    return await input.summarizer.completeBatch!(group)
+                } catch (error) {
+                    logger.warn("Grouped summary call failed", {
+                        sessionKey: input.sessionKey,
+                        error: error instanceof Error ? error.message : String(error),
+                    })
+                    return null
+                }
+            }),
+        )
+        const callSucceeded: boolean[] = []
+        for (let index = 0; index < current.length; index++) {
+            const group = current[index]
+            const output = outcomes[index]
+            let accepted = false
+            for (const job of group) {
+                const value =
+                    output && typeof output[job.key] === "string"
+                        ? validateSummary(output[job.key], job, logger, input.rejectOversized)
+                        : null
+                if (value) {
+                    summaries[job.key] = value
+                    succeeded++
+                    accepted = true
+                } else failed++
+                done++
+                await input.onProgress?.({
+                    total: pending.length,
+                    done,
+                    succeeded,
+                    failed,
+                    ok: !!value,
+                    rangeStartMessageId: job.rangeStartMessageId,
+                    rangeEndMessageId: job.rangeEndMessageId,
+                })
+            }
+            callSucceeded.push(accepted)
+        }
+        updateFailureState(failures, input.sessionKey, callSucceeded, now(), logger)
+        if (failures.get(input.sessionKey)?.openUntil) break
+    }
+    return summaries
+}
+
 async function runJob(
     sessionKey: string,
     job: BoundarySummaryJob,
     summarizer: Summarizer,
     logger: Logger,
+    rejectOversized?: boolean,
 ): Promise<string | null> {
     try {
         const raw = await summarizer.complete(job)
-        return raw === null ? null : validateSummary(raw, job, logger)
+        return raw === null ? null : validateSummary(raw, job, logger, rejectOversized)
     } catch (error) {
         logger.warn("Summary job failed", {
             sessionKey,
@@ -229,7 +361,9 @@ export function formatPrefixSummaryPrompt(
         `New delta range: ${first} through ${last}`,
         "",
         formatSummarySections(
-            SUMMARY_SECTION_HEADERS.map(() => ["(merge prior checkpoint with delta, or use (none))"]),
+            SUMMARY_SECTION_HEADERS.map(() => [
+                "(merge prior checkpoint with delta, or use (none))",
+            ]),
         ),
         "",
         "Prior prefix summary:",
@@ -269,7 +403,12 @@ function dedupeJobs(jobs: BoundarySummaryJob[]): BoundarySummaryJob[] {
     })
 }
 
-function validateSummary(text: string, job: BoundarySummaryJob, logger: Logger): string | null {
+function validateSummary(
+    text: string,
+    job: BoundarySummaryJob,
+    logger: Logger,
+    rejectOversized = false,
+): string | null {
     const summary = text.trim()
     const lines = summary.split(/\r\n|\n|\r/).map((line) => line.trim())
     let headerIndex = -1
@@ -287,6 +426,13 @@ function validateSummary(text: string, job: BoundarySummaryJob, logger: Logger):
         })
         return null
     }
+    if (rejectOversized && summary.length > MAX_SUMMARY_CHARS) {
+        logger.warn("Discarded overlong Better Compact chunk summary", {
+            rangeStartMessageId: job.rangeStartMessageId,
+            length: summary.length,
+        })
+        return null
+    }
     return summary.length <= MAX_SUMMARY_CHARS
         ? summary
         : truncateSummarySections(lines, headerIndexes)
@@ -295,7 +441,10 @@ function validateSummary(text: string, job: BoundarySummaryJob, logger: Logger):
 function truncateSummarySections(lines: string[], headerIndexes: number[]): string {
     const bodies = headerIndexes.map((headerIndex, index) => {
         const nextHeaderIndex = headerIndexes[index + 1] ?? lines.length
-        return lines.slice(headerIndex + 1, nextHeaderIndex).join("\n").trim()
+        return lines
+            .slice(headerIndex + 1, nextHeaderIndex)
+            .join("\n")
+            .trim()
     })
     const render = () =>
         SUMMARY_SECTION_HEADERS.map((header, index) =>

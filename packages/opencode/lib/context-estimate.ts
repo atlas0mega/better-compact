@@ -1,5 +1,6 @@
 import type { WithParts } from "./state"
 import { COMPACTED_TOOL_OUTPUT_PLACEHOLDER, estimateOpenCodeTokens } from "./token-utils"
+import { isSyndicatePluginInjection } from "./messages/injection"
 
 type MessagePart = WithParts["parts"][number]
 
@@ -15,7 +16,9 @@ export interface EstimatedContextBreakdown {
 }
 
 export function estimateOpenCodeMessages(messages: WithParts[]): number {
-    const modelLike = messages.map(toOpenCodeModelLikeMessage).filter((message) => message.parts.length > 0)
+    const modelLike = messages
+        .map(toOpenCodeModelLikeMessage)
+        .filter((message) => message.parts.length > 0)
     return estimateOpenCodeTokens(JSON.stringify(modelLike))
 }
 
@@ -37,6 +40,8 @@ export function estimateContextBreakdown(messages: WithParts[]): EstimatedContex
 
     for (const message of messages) {
         const isReference = isBetterCompactReference(message)
+        const isPluginInjection = isSyndicatePluginInjection(message)
+        let countedInjection = false
         for (const part of message.parts) {
             const estimate = estimatePart(message, part)
             if (estimate <= 0) continue
@@ -44,6 +49,12 @@ export function estimateContextBreakdown(messages: WithParts[]): EstimatedContex
 
             if (isReference) {
                 breakdown.references += estimate
+                continue
+            }
+            if (isPluginInjection) {
+                breakdown.tools += estimate
+                if (!countedInjection) breakdown.toolCount++
+                countedInjection = true
                 continue
             }
             if (part.type === "tool") {
@@ -73,10 +84,14 @@ export function toOpenCodeModelLikeMessage(message: WithParts): { role: string; 
         return {
             role: "user",
             parts: message.parts.flatMap((part): unknown[] => {
-                if (part.type === "text" && !(part as any).ignored && part.text !== "") return [{ type: "text", text: part.text }]
-                if (part.type === "file") return [{ type: "file", mime: part.mime, filename: part.filename }]
-                if (part.type === "compaction") return [{ type: "text", text: "What did we do so far?" }]
-                if (part.type === "subtask") return [{ type: "text", text: "The following tool was executed by the user" }]
+                if (part.type === "text" && !(part as any).ignored && part.text !== "")
+                    return [{ type: "text", text: part.text }]
+                if (part.type === "file")
+                    return [{ type: "file", mime: part.mime, filename: part.filename }]
+                if (part.type === "compaction")
+                    return [{ type: "text", text: "What did we do so far?" }]
+                if (part.type === "subtask")
+                    return [{ type: "text", text: "The following tool was executed by the user" }]
                 return []
             }),
         }
@@ -86,7 +101,8 @@ export function toOpenCodeModelLikeMessage(message: WithParts): { role: string; 
         role: message.info.role,
         parts: message.parts.flatMap((part): unknown[] => {
             if (part.type === "text") return [{ type: "text", text: part.text }]
-            if (part.type === "reasoning" && shouldIncludeReasoning(message)) return [{ type: "reasoning", text: part.text }]
+            if (part.type === "reasoning" && shouldIncludeReasoning(message))
+                return [{ type: "reasoning", text: part.text }]
             if (part.type === "tool") return [toOpenCodeToolPart(part)]
             return []
         }),
@@ -96,11 +112,15 @@ export function toOpenCodeModelLikeMessage(message: WithParts): { role: string; 
 function estimatePart(message: WithParts, part: MessagePart): number {
     if (message.info.role === "user") {
         const modelLike = toOpenCodeModelLikeMessage({ ...message, parts: [part] })
-        return modelLike.parts.length > 0 ? estimateOpenCodeTokens(JSON.stringify(modelLike.parts)) : 0
+        return modelLike.parts.length > 0
+            ? estimateOpenCodeTokens(JSON.stringify(modelLike.parts))
+            : 0
     }
     if (part.type === "tool") return estimateOpenCodeToolPart(part)
-    if (part.type === "text") return estimateOpenCodeTokens(JSON.stringify({ type: "text", text: part.text }))
-    if (part.type === "reasoning" && shouldIncludeReasoning(message)) return estimateOpenCodeTokens(JSON.stringify({ type: "reasoning", text: part.text }))
+    if (part.type === "text")
+        return estimateOpenCodeTokens(JSON.stringify({ type: "text", text: part.text }))
+    if (part.type === "reasoning" && shouldIncludeReasoning(message))
+        return estimateOpenCodeTokens(JSON.stringify({ type: "reasoning", text: part.text }))
     return 0
 }
 
@@ -111,7 +131,9 @@ function toOpenCodeToolPart(part: Extract<MessagePart, { type: "tool" }>): unkno
             state: "output-available",
             toolCallId: part.callID,
             input: part.state.input,
-            output: part.state.time?.compacted ? COMPACTED_TOOL_OUTPUT_PLACEHOLDER : part.state.output,
+            output: part.state.time?.compacted
+                ? COMPACTED_TOOL_OUTPUT_PLACEHOLDER
+                : part.state.output,
         }
     }
     if (part.state?.status === "error") {
@@ -134,7 +156,8 @@ function toOpenCodeToolPart(part: Extract<MessagePart, { type: "tool" }>): unkno
 function isBetterCompactReference(message: WithParts): boolean {
     if (message.info.id.startsWith("msg_better_compact_")) return true
     return message.parts.some(
-        (part) => part.type === "text" && /^\[(?:Better Compact|Context Summary)/.test(part.text.trim()),
+        (part) =>
+            part.type === "text" && /^\[(?:Better Compact|Context Summary)/.test(part.text.trim()),
     )
 }
 

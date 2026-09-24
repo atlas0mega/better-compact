@@ -1,15 +1,31 @@
 import type { BoundaryContextPlan } from "@better-compact/core"
 
-export function formatBoundaryReport(plan: BoundaryContextPlan, actualCurrentTokens?: number): string {
-    const before = actualCurrentTokens && actualCurrentTokens > 0 ? actualCurrentTokens : plan.beforeTokens
+export function formatBoundaryReport(
+    plan: BoundaryContextPlan,
+    actualCurrentTokens?: number,
+): string {
+    const before =
+        actualCurrentTokens && actualCurrentTokens > 0 ? actualCurrentTokens : plan.beforeTokens
     const now = plan.afterPruneTokens
     const reduced = Math.max(0, before - now)
     const reductionPercent = before > 0 ? Math.round((reduced / before) * 100) : 0
     const stageRows = plan.stages
         .filter((stage) => stage.status !== "skipped" || stage.clearedTokens > 0)
         .map((stage) => {
-            const icon = stage.clearedTokens > 0 ? "✓" : stage.status === "target-met" ? "✓" : "-"
-            const detail = stage.clearedTokens > 0 ? `-${formatTokenCount(stage.clearedTokens)}` : "not needed"
+            const icon =
+                stage.clearedTokens > 0 ||
+                stage.status === "applied" ||
+                stage.status === "target-met"
+                    ? "✓"
+                    : "-"
+            const detail =
+                stage.clearedTokens > 0
+                    ? `-${formatTokenCount(stage.clearedTokens)}`
+                    : stage.status === "applied"
+                      ? "applied (no net savings)"
+                      : stage.status === "failed"
+                        ? "did not reach target"
+                        : "not needed"
             return `  ${icon} ${stage.label.padEnd(38)} ${detail}`
         })
     return [
@@ -41,7 +57,12 @@ export function formatBoundaryReport(plan: BoundaryContextPlan, actualCurrentTok
         .join("\n")
 }
 
-function formatContextWindowLine(label: string, tokens: number, limit: number, suffix?: string): string {
+function formatContextWindowLine(
+    label: string,
+    tokens: number,
+    limit: number,
+    suffix?: string,
+): string {
     const width = 18
     const boundedLimit = Math.max(1, limit)
     const ratio = tokens / boundedLimit

@@ -35,7 +35,13 @@ function toolPart(messageID: string, output: string) {
     }
 }
 
-function message(id: string, role: "user" | "assistant", parts: WithParts["parts"], created: number, tokens?: any): WithParts {
+function message(
+    id: string,
+    role: "user" | "assistant",
+    parts: WithParts["parts"],
+    created: number,
+    tokens?: any,
+): WithParts {
     return {
         info: {
             id,
@@ -60,7 +66,10 @@ test("context breakdown keeps provider total separate from estimated history cat
         message(
             "msg-assistant-1",
             "assistant",
-            [textPart("msg-assistant-1", "assistant response"), toolPart("msg-assistant-1", "tool output ".repeat(100))],
+            [
+                textPart("msg-assistant-1", "assistant response"),
+                toolPart("msg-assistant-1", "tool output ".repeat(100)),
+            ],
             2,
             {
                 input: 650_000,
@@ -79,6 +88,33 @@ test("context breakdown keeps provider total separate from estimated history cat
     assert.ok(breakdown.assistant > 0)
     assert.ok(breakdown.tools > 0)
     assert.equal(breakdown.references, 0)
+})
+
+test("Syndicate plugin prompt tokens are reported as tool context rather than user intent", () => {
+    const state = createSessionState()
+    state.sessionId = sessionID
+    const human = message(
+        "msg-user-1",
+        "user",
+        [textPart("msg-user-1", "Keep this user request")],
+        1,
+    )
+    const injected = message(
+        "msg-plugin",
+        "user",
+        [
+            textPart(
+                "msg-plugin",
+                "Plugin alert\n\n[plugin-injection:12345678-1234-4234-8234-123456789abc]",
+            ),
+        ],
+        2,
+    )
+    const baseline = analyzeContextTokens(state, [human])
+    const breakdown = analyzeContextTokens(state, [human, injected])
+    assert.equal(breakdown.user, baseline.user)
+    assert.ok(breakdown.tools > 0)
+    assert.equal(breakdown.toolCount, 1)
 })
 
 test("context report does not claim a fake system percentage", () => {

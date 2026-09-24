@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { PluginConfig } from "../lib/config"
+import { buildBoundaryContextPlan } from "../lib/boundary"
 import {
     createChatMessageHandler,
     createChatMessageTransformHandler,
@@ -240,6 +241,46 @@ function buildOverTriggerConversation(sessionId: string): WithParts[] {
     ]
 }
 
+function buildProfileEscalationConversation(sessionId: string): WithParts[] {
+    const messages = [
+        buildUserMessage("profile-old-user", "Important instruction ".repeat(2_000), 1, sessionId),
+    ]
+    for (let index = 0; index < 8; index++) {
+        const assistant = buildMessage(
+            `profile-assistant-${index}`,
+            "assistant",
+            `progress ${index} ${"x".repeat(4_000)}`,
+        )
+        assistant.info.sessionID = sessionId
+        for (const part of assistant.parts) part.sessionID = sessionId
+        messages.push(assistant)
+    }
+    messages.push(buildUserMessage("profile-middle-user", "middle request", 20, sessionId))
+    const tail = buildMessage("profile-tail", "assistant", "recent response")
+    tail.info.sessionID = sessionId
+    for (const part of tail.parts) part.sessionID = sessionId
+    messages.push(tail, buildUserMessage("profile-latest-user", "current request", 22, sessionId))
+    return messages
+}
+
+function profileEscalationConfig(prefixSummary: boolean, collapsePercent: number): PluginConfig {
+    const config = buildConfig("allow")
+    config.compaction = {
+        automatic: true,
+        preset: "custom",
+        summaryEffort: "off",
+        custom: {
+            triggerPercent: 1,
+            targetPercent: 1,
+            recentToolTokens: 0,
+            summarizerConcurrency: 1,
+            prefixSummary,
+            collapsePercent,
+        },
+    }
+    return config
+}
+
 function transformClient(contextLimit: number, toasts: unknown[] = []) {
     return {
         session: { get: async () => ({ data: { parentID: null } }) },
@@ -350,6 +391,376 @@ test("auto transform path honors the configured compaction profile", async () =>
         controlRuntime.get(controlSessionId).boundary.activePlan,
         null,
         "default 85% trigger must not fire at ~8% usage",
+    )
+})
+
+test("automatic compaction honors the prefix-summary opt-in and assistant collapse cap", async () => {
+    const plans = [] as NonNullable<ReturnType<RuntimeState["get"]>["boundary"]["activePlan"]>[]
+    for (const [prefixSummary, collapsePercent] of [
+        [false, 10],
+        [false, 75],
+        [true, 10],
+    ] as const) {
+        const sessionId = `ses-auto-profile-${prefixSummary}-${collapsePercent}-${Date.now()}`
+        const messages = buildProfileEscalationConversation(sessionId)
+        const client = transformClient(50_000)
+        const runtime = createRuntimeState(client, new Logger(false))
+        await transformHandler(
+            client,
+            runtime,
+            profileEscalationConfig(prefixSummary, collapsePercent),
+            mkdtempSync(join(tmpdir(), "better-compact-profile-auto-")),
+        )({}, { messages })
+        const plan = runtime.get(sessionId).boundary.activePlan
+        assert.ok(plan)
+        plans.push(plan)
+    }
+
+    assert.ok(!plans[0].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[0].assistantSummaryKeys?.length, 1)
+    assert.ok((plans[1].assistantSummaryKeys?.length ?? 0) > 1)
+    assert.ok(plans[2].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[2].assistantSummaryKeys?.length, 1)
+})
+
+test("manual compaction honors the prefix-summary opt-in and assistant collapse cap", async () => {
+    const plans = [] as NonNullable<ReturnType<RuntimeState["get"]>["boundary"]["activePlan"]>[]
+    for (const [prefixSummary, collapsePercent] of [
+        [false, 10],
+        [false, 75],
+        [true, 10],
+    ] as const) {
+        const sessionId = `ses-manual-profile-${prefixSummary}-${collapsePercent}-${Date.now()}`
+        const messages = buildProfileEscalationConversation(sessionId)
+        const client = {
+            session: {
+                get: async () => ({ data: { parentID: null } }),
+                messages: async () => ({ data: messages }),
+                prompt: async () => ({ data: true }),
+            },
+        }
+        const runtime = createRuntimeState(client, new Logger(false))
+        const state = runtime.get(sessionId)
+        state.modelContextLimit = 50_000
+        await createCommandExecuteHandler(
+            client as any,
+            runtime,
+            new Logger(false),
+            profileEscalationConfig(prefixSummary, collapsePercent),
+            mkdtempSync(join(tmpdir(), "better-compact-profile-manual-")),
+            { global: undefined, agents: {} },
+        )({ command: "better-compact", sessionID: sessionId, arguments: "" }, { parts: [] })
+        await waitFor(() => state.boundary.job?.status === "completed")
+        assert.ok(state.boundary.activePlan)
+        plans.push(state.boundary.activePlan)
+    }
+
+    assert.ok(!plans[0].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[0].assistantSummaryKeys?.length, 1)
+    assert.ok((plans[1].assistantSummaryKeys?.length ?? 0) > 1)
+    assert.ok(plans[2].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[2].assistantSummaryKeys?.length, 1)
+})
+
+test("manual TUI compaction routes scratch summaries to the configured model effort", async () => {
+    const sessionId = `ses-summary-model-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionId)
+    const summary = [
+        "## Decisions",
+        "- Completed the requested work.",
+        "## Files & Symbols",
+        "- src/app.ts",
+        "## Errors (verbatim)",
+        "- (none)",
+        "## What failed and why",
+        "- (none)",
+        "## Constraints",
+        "- Preserve the contract.",
+        "## Next step",
+        "- Continue implementation.",
+    ].join("\n")
+    const scratchPrompts: any[] = []
+    const client = {
+        provider: {
+            list: async () => ({
+                data: {
+                    all: [{ id: "openai", models: { "gpt-6-luna": { variants: { high: {} } } } }],
+                },
+            }),
+        },
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+            create: async ({ body }: any) => {
+                assert.deepEqual(body.model, { providerID: "openai", id: "gpt-6-luna" })
+                return { data: { id: `scratch-${sessionId}` } }
+            },
+            prompt: async (input: any) => {
+                if (input.body.noReply) return { data: true }
+                scratchPrompts.push(input)
+                return { data: { parts: [{ type: "text", text: summary }] } }
+            },
+            delete: async () => ({ data: true }),
+        },
+    }
+    const config = profileEscalationConfig(false, 10)
+    config.compaction.summaryEffort = "high"
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    const runtime = createRuntimeState(client, new Logger(false))
+    const state = runtime.get(sessionId)
+    state.modelContextLimit = 50_000
+    const handler = createChatMessageHandler(
+        client as any,
+        runtime,
+        new Logger(false),
+        config,
+        mkdtempSync(join(tmpdir(), "better-compact-summary-model-")),
+        { global: undefined, agents: {} },
+    )
+    await handler(
+        {
+            sessionID: sessionId,
+            model: { providerID: "anthropic", modelID: "claude-test" },
+            variant: "low",
+        },
+        {
+            message: { agent: "assistant" },
+            parts: [
+                {
+                    type: "text",
+                    ignored: true,
+                    metadata: {
+                        betterCompact: "run",
+                        summaryVariant: "low",
+                        summaryProviderID: "anthropic",
+                        summaryModelID: "claude-test",
+                        contextLimit: 50_000,
+                    },
+                },
+            ],
+        },
+    )
+    await waitFor(() => state.boundary.job?.status === "completed")
+    assert.ok(scratchPrompts.length > 0)
+    for (const prompt of scratchPrompts) {
+        assert.deepEqual(prompt.body.model, { providerID: "openai", modelID: "gpt-6-luna" })
+        assert.equal(prompt.body.variant, "high")
+    }
+    assert.ok((state.boundary.job?.counters.summaryJobsSucceeded ?? 0) > 0)
+})
+
+test("manual compaction rejects verbose turn summaries that increase live context", async () => {
+    const sessionId = `ses-summary-growth-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionId)
+    const config = profileEscalationConfig(false, 10)
+    config.compaction.summaryEffort = "high"
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    const baseline = buildBoundaryContextPlan(messages, {
+        contextLimit: 50_000,
+        force: true,
+        triggerRatio: 0.01,
+        targetRatio: 0.01,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: false,
+        collapsePercent: 10,
+        summariesAllowed: true,
+    })
+    assert.ok(baseline?.summaryJobs.length)
+    const verboseSummary = [
+        "## Decisions",
+        `- ${"Detailed but redundant work. ".repeat(115)}`,
+        "## Files & Symbols",
+        "- src/app.ts",
+        "## Errors (verbatim)",
+        "- (none)",
+        "## What failed and why",
+        "- (none)",
+        "## Constraints",
+        "- Preserve the contract.",
+        "## Next step",
+        "- Continue implementation.",
+    ].join("\n")
+    let calls = 0
+    const client = {
+        provider: {
+            list: async () => ({
+                data: {
+                    all: [
+                        {
+                            id: "openai",
+                            models: {
+                                "gpt-6-luna": { variants: { high: {} } },
+                            },
+                        },
+                    ],
+                },
+            }),
+        },
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+            create: async () => ({ data: { id: `scratch-${sessionId}` } }),
+            prompt: async ({ body }: any) => {
+                if (body.noReply) return { data: true }
+                calls++
+                return { data: { parts: [{ type: "text", text: verboseSummary }] } }
+            },
+            delete: async () => ({ data: true }),
+        },
+    }
+    const logger = new Logger(false)
+    const runtime = createRuntimeState(client, logger)
+    const state = runtime.get(sessionId)
+    state.modelContextLimit = 50_000
+    const handler = createChatMessageHandler(
+        client as any,
+        runtime,
+        logger,
+        config,
+        mkdtempSync(join(tmpdir(), "better-compact-summary-growth-")),
+        { global: undefined, agents: {} },
+    )
+    await handler(
+        { sessionID: sessionId, model: { providerID: "anthropic", modelID: "claude-test" } },
+        {
+            message: { agent: "assistant" },
+            parts: [
+                {
+                    type: "text",
+                    ignored: true,
+                    metadata: {
+                        betterCompact: "run",
+                        contextLimit: 50_000,
+                        summaryProviderID: "anthropic",
+                        summaryModelID: "claude-test",
+                    },
+                },
+            ],
+        },
+    )
+    await waitFor(() => state.boundary.job?.status === "completed")
+    assert.ok(calls > 0)
+    assert.ok((state.boundary.job?.counters.summaryJobsSucceeded ?? 0) > 0)
+    assert.ok(
+        (state.boundary.activePlan?.afterPruneTokens ?? Infinity) <= baseline.afterPruneTokens,
+    )
+    assert.deepEqual(state.boundary.activePlan?.assistantSummaries, {})
+    assert.ok(
+        state.boundary.job?.stages.some(
+            (stage) => stage.id === "assistant-runs" && stage.detail?.includes("0/"),
+        ),
+    )
+})
+
+test("manual prefix compaction synthesizes bounded turns without sending one giant transcript", async () => {
+    const sessionId = `ses-prefix-chunks-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionId)
+    const config = profileEscalationConfig(true, 45)
+    config.compaction.summaryEffort = "high"
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    let prompts = 0
+    const sdk = {
+        provider: {
+            list: async () => ({
+                data: {
+                    all: [
+                        {
+                            id: "openai",
+                            models: {
+                                "gpt-6-luna": {
+                                    variants: { high: {} },
+                                    limit: { context: 262_144 },
+                                },
+                            },
+                        },
+                    ],
+                },
+            }),
+        },
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+            create: async () => ({ data: { id: `scratch-${sessionId}` } }),
+            prompt: async ({ body }: any) => {
+                if (body.noReply) return { data: true }
+                prompts++
+                assert.deepEqual(body.model, { providerID: "openai", modelID: "gpt-6-luna" })
+                assert.equal(body.variant, "high")
+                assert.match(body.parts[0].text, /Consolidate this chronological slice/)
+                assert.ok(body.parts[0].text.length < 50_000)
+                assert.doesNotMatch(
+                    body.parts[0].text,
+                    /Source transcript:\n# Better Compact Raw Transcript/,
+                )
+                return {
+                    data: {
+                        parts: [
+                            {
+                                type: "text",
+                                text: [
+                                    "## Decisions",
+                                    "- Completed src/app.ts while keeping the active task intact.",
+                                    "## Files & Symbols",
+                                    "- src/app.ts",
+                                    "## Errors (verbatim)",
+                                    "- (none)",
+                                    "## What failed and why",
+                                    "- (none)",
+                                    "## Constraints",
+                                    "- Keep user requirements.",
+                                    "## Next step",
+                                    "- Validate the latest implementation.",
+                                ].join("\n"),
+                            },
+                        ],
+                    },
+                }
+            },
+            delete: async () => ({ data: true }),
+        },
+    }
+    const logger = new Logger(false)
+    const runtime = createRuntimeState(sdk, logger)
+    const state = runtime.get(sessionId)
+    state.modelContextLimit = 50_000
+    const handler = createChatMessageHandler(
+        sdk as any,
+        runtime,
+        logger,
+        config,
+        mkdtempSync(join(tmpdir(), "better-compact-prefix-chunks-")),
+        { global: undefined, agents: {} },
+    )
+    await handler(
+        { sessionID: sessionId, model: { providerID: "anthropic", modelID: "claude-test" } },
+        {
+            message: { agent: "assistant" },
+            parts: [
+                {
+                    type: "text",
+                    ignored: true,
+                    metadata: {
+                        betterCompact: "run",
+                        contextLimit: 50_000,
+                        summaryProviderID: "anthropic",
+                        summaryModelID: "claude-test",
+                    },
+                },
+            ],
+        },
+    )
+    await waitFor(() => state.boundary.job?.status === "completed")
+    assert.equal(prompts, 1)
+    assert.equal(state.boundary.job?.counters.summaryJobsDone, 1)
+    assert.equal(state.boundary.activePlan?.prefixChunkAttempted, true)
+    assert.match(state.boundary.activePlan?.prefixSummary ?? "", /Important instruction/)
+    assert.match(
+        state.boundary.activePlan?.prefixSummary ?? "",
+        /Validate the latest implementation/,
+    )
+    assert.doesNotMatch(
+        state.boundary.activePlan?.prefixSummary ?? "",
+        /Resume from prior assistant progress:/,
     )
 })
 
@@ -968,6 +1379,8 @@ async function persistForkSourcePlan(directory: string, prefix: WithParts[]): Pr
         overheadTokens: 0,
         triggerTokens: 85_000,
         targetTokens: 35_000,
+        prefixSummaryAllowed: false,
+        collapsePercent: 25,
         requiresCustomCompaction: false,
         stages: [],
         createdAt: 1,

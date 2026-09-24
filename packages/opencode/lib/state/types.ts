@@ -56,6 +56,13 @@ export interface BoundaryJobProgress {
 export interface BoundaryPlanSnapshot extends PlanSnapshot {
     prefixFingerprint?: string
     compactedMessageCount?: number
+    // Absent in snapshots created before generated plugin prompts were
+    // classified as tool-like. Used to replan older affected sessions once.
+    pluginInjectionPruning?: true
+    // Prevent repeatedly paying for a chunk synthesis on an unchanged range.
+    prefixChunkAttempted?: true
+    prefixChunkVersion?: number
+    prefixChunkModel?: string
 }
 
 export interface BoundaryState {

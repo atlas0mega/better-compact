@@ -104,6 +104,21 @@ test("summary scheduler accepts an oversized structured summary", async () => {
     assert.match(stored, /^- Run pnpm test\.$/m)
 })
 
+test("chunk summaries reject oversized output rather than silently truncating facts", async () => {
+    const warnings: Array<{ message: string; data: unknown }> = []
+    const summaries = await createSummaryScheduler(logger(warnings)).summarize({
+        sessionKey: "session-prefix-chunk",
+        jobs: [job],
+        summarizer: {
+            complete: async () =>
+                validSummary.replace("- Keep the canonical parser.", `- ${"x".repeat(4_000)}`),
+        },
+        rejectOversized: true,
+    })
+    assert.deepEqual(summaries, {})
+    assert.ok(warnings.some((warning) => warning.message.includes("overlong")))
+})
+
 test("summary scheduler rejects a too-short response", async () => {
     const warnings: Array<{ message: string; data: unknown }> = []
     const scheduler = createSummaryScheduler(logger(warnings))
@@ -243,4 +258,125 @@ test("an interleaved success resets the consecutive failure count", async () => 
     })
 
     assert.equal(calls, 6)
+})
+
+test("grouped summaries scale to five balanced calls per compaction", async () => {
+    const batches: BoundarySummaryJob[][] = []
+    let active = 0
+    let maxActive = 0
+    const scheduler = createSummaryScheduler(logger([]))
+    const jobs = Array.from({ length: 40 }, (_, index) => ({
+        ...job,
+        key: `run-${index}`,
+        prompt: `Summarize turn ${index}: ${"x".repeat(4_000)}`,
+    }))
+    const request = {
+        sessionKey: "session-cost-budget",
+        jobs,
+        maxCalls: 5,
+        concurrency: 5,
+        targetBatchTokens: 5_000,
+        maxBatchTokens: 10_000,
+        maxJobsPerBatch: 16,
+        summarizer: {
+            complete: async () => {
+                throw new Error("single-turn transport must not run")
+            },
+            completeBatch: async (group: BoundarySummaryJob[]) => {
+                active++
+                maxActive = Math.max(maxActive, active)
+                await new Promise((resolve) => setTimeout(resolve, 1))
+                batches.push(group)
+                active--
+                return Object.fromEntries(group.map((item) => [item.key, validSummary]))
+            },
+        },
+    }
+
+    const first = await scheduler.summarize(request)
+    assert.equal(Object.keys(first).length, 40)
+    assert.equal(batches.length, 5)
+    assert.equal(maxActive, 5)
+    assert.deepEqual(
+        batches.map((group) => group.length),
+        [8, 8, 8, 8, 8],
+    )
+    assert.equal(Object.keys(await scheduler.summarize(request)).length, 40)
+    assert.equal(batches.length, 10)
+})
+
+test("grouped summaries sample evenly across history when the input budget is exceeded", async () => {
+    const groups: BoundarySummaryJob[][] = []
+    const scheduler = createSummaryScheduler(logger([]))
+    const jobs = Array.from({ length: 100 }, (_, index) => ({
+        ...job,
+        key: `run-${index}`,
+        prompt: `Historical turn ${index}: ${"x".repeat(4_000)}`,
+    }))
+    const summaries = await scheduler.summarize({
+        sessionKey: "session-spread",
+        jobs,
+        maxCalls: 5,
+        targetBatchTokens: 5_000,
+        maxBatchTokens: 6_000,
+        maxJobsPerBatch: 10,
+        summarizer: {
+            complete: async () => null,
+            completeBatch: async (group) => {
+                groups.push(group)
+                return Object.fromEntries(group.map((item) => [item.key, validSummary]))
+            },
+        },
+    })
+    const indices = Object.keys(summaries).map((key) => Number(key.slice(4)))
+    assert.equal(groups.length, 5)
+    assert.ok(indices.length > 0 && indices.length < 100)
+    assert.ok(Math.min(...indices) < 5)
+    assert.ok(Math.max(...indices) > 95)
+    assert.ok(groups.every((group) => group.length <= 10))
+})
+
+test("many short turns use one call when their combined input fits the target", async () => {
+    const groups: BoundarySummaryJob[][] = []
+    const scheduler = createSummaryScheduler(logger([]))
+    const jobs = Array.from({ length: 100 }, (_, index) => ({ ...job, key: `run-${index}` }))
+    const summaries = await scheduler.summarize({
+        sessionKey: "session-short-turns",
+        jobs,
+        maxCalls: 5,
+        targetBatchTokens: 12_000,
+        maxJobsPerBatch: 16,
+        summarizer: {
+            complete: async () => null,
+            completeBatch: async (group) => {
+                groups.push(group)
+                return Object.fromEntries(group.map((item) => [item.key, validSummary]))
+            },
+        },
+    })
+    assert.equal(groups.length, 1)
+    assert.equal(Object.keys(summaries).length, 16)
+    assert.ok(groups[0].some((item) => item.key === "run-96"))
+})
+
+test("grouped summary failures stop after three model calls", async () => {
+    let calls = 0
+    const scheduler = createSummaryScheduler(logger([]))
+    const jobs = Array.from({ length: 10 }, (_, index) => ({ ...job, key: `run-${index}` }))
+    await scheduler.summarize({
+        sessionKey: "session-group-breaker",
+        jobs,
+        concurrency: 1,
+        maxCalls: 5,
+        targetBatchTokens: 1,
+        maxJobsPerBatch: 2,
+        summarizer: {
+            complete: async () => null,
+            completeBatch: async () => {
+                calls++
+                return null
+            },
+        },
+    })
+    assert.equal(calls, 3)
 })

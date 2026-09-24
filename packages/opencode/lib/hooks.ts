@@ -10,6 +10,8 @@ import { compressPermission, syncCompressPermissionState } from "./compress-perm
 import { saveSessionState } from "./state"
 import {
     buildBoundaryContextPlan,
+    buildPrefixChunks,
+    adaptiveTailUserTurns,
     findMatchingBoundaryPlan,
     formatBoundaryReport,
     appendBoundaryLog,
@@ -21,11 +23,14 @@ import {
     startBoundaryJob,
     storeBoundaryPlan,
     summarizeBoundaryJobs,
+    summarizePrefixChunks,
+    toBoundaryPlanSnapshot,
     updateBoundaryCounters,
     updateBoundaryPercent,
     writeBoundaryTranscript,
     type BoundaryContextPlan,
 } from "./boundary"
+import { openCodeCodec } from "./codec"
 import { getCurrentParams, getCurrentTokenUsage } from "./token-utils"
 import { sendIgnoredMessage } from "./ui/notification"
 
@@ -185,6 +190,20 @@ async function runAutomaticTransform(input: {
                         parentSessionId: input.sessionId,
                         jobs,
                         params: input.params,
+                        summaryEffort: input.config.compaction.summaryEffort,
+                        summaryModel: input.config.compaction.summaryModel,
+                        concurrency: resolveCompactionProfile(input.config).summarizerConcurrency,
+                    }),
+                summarizePrefix: (plan, turns) =>
+                    summarizePrefixChunks({
+                        client: input.client,
+                        runtime: input.runtime,
+                        logger: input.logger,
+                        parentSessionId: input.sessionId,
+                        plan,
+                        turns,
+                        params: input.params,
+                        summaryModel: input.config.compaction.summaryModel,
                         summaryEffort: input.config.compaction.summaryEffort,
                         concurrency: resolveCompactionProfile(input.config).summarizerConcurrency,
                     }),
@@ -550,6 +569,12 @@ async function runBetterCompact(input: {
             "Estimating context and selecting pruning stages",
         )
         await saveProgress()
+        const minTailUserTurns = adaptiveTailUserTurns(
+            input.messages,
+            contextLimit,
+            profile.targetPercent,
+            effectiveConfig.compaction.targetTokens,
+        )
         const plan = buildBoundaryContextPlan(input.messages, {
             contextLimit,
             force: true,
@@ -558,6 +583,9 @@ async function runBetterCompact(input: {
             triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
             targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
             recentToolResultBudgetTokens: profile.recentToolTokens,
+            minTailUserTurns,
+            prefixSummaryAllowed: profile.prefixSummary,
+            collapsePercent: profile.collapsePercent,
             providerReportedTokens: reportedCurrentTokens,
             summariesAllowed,
             priorPlan: input.state.boundary.activePlan ?? undefined,
@@ -665,20 +693,101 @@ async function runBetterCompact(input: {
         await saveProgress()
 
         let finalPlan = plan
-        if (plan.summaryJobs.length > 0) {
-            const summaryStage = plan.summaryJobs.some(
-                (job) => !job.key.startsWith("prefix-summary:"),
+        const prefixChunks =
+            summariesAllowed && profile.prefixSummary && plan.afterPruneTokens > plan.targetTokens
+                ? buildPrefixChunks(plan)
+                : []
+        let prefixAttempted = false
+        if (prefixChunks.length > 0) {
+            prefixAttempted = true
+            setBoundaryStage(
+                input.state,
+                "prefix-summary",
+                "running",
+                `Consolidating ${prefixChunks.reduce((sum, chunk) => sum + chunk.count, 0)} progress entries in ${prefixChunks.length} parallel chunks`,
             )
+            updateBoundaryCounters(input.state, {
+                summaryJobsTotal: prefixChunks.length,
+                summaryJobsDone: 0,
+                summaryJobsSucceeded: 0,
+                summaryJobsFailed: 0,
+            })
+            await saveProgress()
+            const consolidated = await summarizePrefixChunks({
+                client: input.client,
+                runtime: input.runtime,
+                logger: input.logger,
+                parentSessionId: input.sessionId,
+                plan,
+                turns: openCodeCodec.encode(input.messages),
+                params: { ...params, variant: input.summaryVariant ?? params.variant },
+                summaryModel: effectiveConfig.compaction.summaryModel,
+                summaryEffort:
+                    input.summaryVariant && !effectiveConfig.compaction.summaryModel
+                        ? "inherit"
+                        : (input.compaction?.summaryEffort ??
+                          effectiveConfig.compaction.summaryEffort),
+                concurrency: profile.summarizerConcurrency,
+                onProgress: async (event) => {
+                    updateBoundaryCounters(input.state, {
+                        summaryJobsTotal: event.total,
+                        summaryJobsDone: event.done,
+                        summaryJobsSucceeded: event.succeeded,
+                        summaryJobsFailed: event.failed,
+                    })
+                    await saveProgress()
+                },
+            })
+            if (consolidated) {
+                const rebuilt = buildBoundaryContextPlan(input.messages, {
+                    contextLimit,
+                    force: true,
+                    prefixSummary: consolidated,
+                    triggerRatio: profile.triggerPercent / 100,
+                    targetRatio: profile.targetPercent / 100,
+                    triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
+                    targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
+                    recentToolResultBudgetTokens: profile.recentToolTokens,
+                    minTailUserTurns,
+                    prefixSummaryAllowed: profile.prefixSummary,
+                    collapsePercent: profile.collapsePercent,
+                    providerReportedTokens: reportedCurrentTokens,
+                    summariesAllowed,
+                    priorPlan: toBoundaryPlanSnapshot(plan, input.messages),
+                })
+                if (
+                    rebuilt?.requiresCustomCompaction &&
+                    rebuilt.afterPruneTokens < plan.afterPruneTokens
+                )
+                    finalPlan = rebuilt
+            }
+            setBoundaryStage(
+                input.state,
+                "prefix-summary",
+                finalPlan === plan ? "failed" : "completed",
+                finalPlan === plan
+                    ? "Keeping original prefix; chunk synthesis incomplete or not smaller"
+                    : `Consolidated prefix: ${formatCompactTokens(plan.afterPruneTokens)} -> ${formatCompactTokens(finalPlan.afterPruneTokens)}`,
+            )
+            await saveProgress()
+        }
+        const activeJobs = prefixAttempted
+            ? []
+            : plan.requiresCustomCompaction
+              ? plan.summaryJobs.filter((job) => job.key.startsWith("prefix-summary:"))
+              : plan.summaryJobs
+        if (activeJobs.length > 0) {
+            const summaryStage = activeJobs.some((job) => !job.key.startsWith("prefix-summary:"))
                 ? "assistant-runs"
                 : "prefix-summary"
             setBoundaryStage(
                 input.state,
                 summaryStage,
                 "running",
-                `${plan.summaryJobs.length} summary jobs queued`,
+                `${activeJobs.length} summaries selected for up to 5 grouped calls`,
             )
             updateBoundaryCounters(input.state, {
-                summaryJobsTotal: plan.summaryJobs.length,
+                summaryJobsTotal: activeJobs.length,
                 summaryJobsDone: 0,
                 summaryJobsSucceeded: 0,
                 summaryJobsFailed: 0,
@@ -686,18 +795,24 @@ async function runBetterCompact(input: {
             })
             appendBoundaryLog(
                 input.state,
-                `Running ${plan.summaryJobs.length} summary jobs in parallel.`,
+                `Distributing ${activeJobs.length} selected summaries across up to 5 concurrent scratch calls.`,
             )
             await saveProgress()
             const assistantSummaries = await summarizeBoundaryJobs({
-                summaryEffort: input.summaryVariant
-                    ? "inherit"
-                    : (input.compaction?.summaryEffort ?? effectiveConfig.compaction.summaryEffort),
+                summaryEffort:
+                    input.summaryVariant &&
+                    (!effectiveConfig.compaction.summaryModel ||
+                        effectiveConfig.compaction.summaryModel ===
+                            `${params.providerId}/${params.modelId}`)
+                        ? "inherit"
+                        : (input.compaction?.summaryEffort ??
+                          effectiveConfig.compaction.summaryEffort),
+                summaryModel: effectiveConfig.compaction.summaryModel,
                 client: input.client,
                 runtime: input.runtime,
                 logger: input.logger,
                 parentSessionId: input.sessionId,
-                jobs: plan.summaryJobs,
+                jobs: activeJobs,
                 params: {
                     ...params,
                     variant: input.summaryVariant ?? params.variant,
@@ -720,26 +835,41 @@ async function runBetterCompact(input: {
                 },
             })
             if (Object.keys(assistantSummaries).length > 0) {
-                finalPlan =
-                    buildBoundaryContextPlan(input.messages, {
-                        contextLimit,
-                        force: true,
-                        assistantSummaries,
-                        triggerRatio: profile.triggerPercent / 100,
-                        targetRatio: profile.targetPercent / 100,
-                        triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
-                        targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
-                        recentToolResultBudgetTokens: profile.recentToolTokens,
-                        providerReportedTokens: reportedCurrentTokens,
-                        summariesAllowed,
-                        priorPlan: input.state.boundary.activePlan ?? undefined,
-                    }) ?? plan
+                const rebuilt = buildBoundaryContextPlan(input.messages, {
+                    contextLimit,
+                    force: true,
+                    assistantSummaries,
+                    triggerRatio: profile.triggerPercent / 100,
+                    targetRatio: profile.targetPercent / 100,
+                    triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
+                    targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
+                    recentToolResultBudgetTokens: profile.recentToolTokens,
+                    minTailUserTurns,
+                    prefixSummaryAllowed: profile.prefixSummary,
+                    collapsePercent: profile.collapsePercent,
+                    providerReportedTokens: reportedCurrentTokens,
+                    summariesAllowed,
+                    priorPlan: input.state.boundary.activePlan ?? undefined,
+                })
+                if (rebuilt && rebuilt.afterPruneTokens <= plan.afterPruneTokens) {
+                    finalPlan = rebuilt
+                } else if (rebuilt) {
+                    appendBoundaryLog(
+                        input.state,
+                        `Retained smaller plan: model summaries projected ${formatCompactTokens(rebuilt.afterPruneTokens)} versus ${formatCompactTokens(plan.afterPruneTokens)}.`,
+                    )
+                }
             }
+            const appliedSummaries = Math.max(
+                0,
+                Object.keys(finalPlan.assistantSummaries).length -
+                    Object.keys(plan.assistantSummaries).length,
+            )
             setBoundaryStage(
                 input.state,
                 summaryStage,
                 "completed",
-                `${Object.keys(assistantSummaries).length}/${plan.summaryJobs.length} summaries accepted`,
+                `${appliedSummaries}/${activeJobs.length} summaries applied (${Object.keys(assistantSummaries).length} valid; ${input.state.boundary.job?.counters.summaryJobsDone ?? 0} attempted; remaining turns use deterministic fallback)`,
             )
             updateBoundaryCounters(input.state, {
                 currentTokens: finalPlan.afterPruneTokens,
@@ -774,6 +904,8 @@ async function runBetterCompact(input: {
         setBoundaryStage(input.state, "store", "running", "Persisting virtual context plan")
         await saveProgress()
         storeBoundaryPlan(input.state, finalPlan, input.messages)
+        if (prefixAttempted && input.state.boundary.activePlan)
+            input.state.boundary.activePlan.prefixChunkAttempted = true
         updateBoundaryCounters(input.state, {
             afterTokens: finalPlan.afterPruneTokens,
             currentTokens: finalPlan.afterPruneTokens,
