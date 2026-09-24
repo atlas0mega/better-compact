@@ -79,3 +79,32 @@ test("reasoning timing cannot invalidate the prefix, but reasoning content still
     Object.assign(updated.parts[1], { text: "Different conclusion" })
     assert.notEqual(boundaryRangeHash([original]), boundaryRangeHash([updated]))
 })
+
+test("accumulated user-message diff summaries do not change the provider prefix", () => {
+    const original: WithParts = {
+        info: {
+            id: "message",
+            sessionID: "session",
+            role: "user",
+            time: { created: 1 },
+            summary: { diffs: [] },
+        } as WithParts["info"],
+        parts: [
+            {
+                id: "part",
+                messageID: "message",
+                sessionID: "session",
+                type: "text",
+                text: "Keep the original request",
+            },
+        ],
+    }
+    const later = structuredClone(original)
+    Object.assign(later.info, {
+        summary: { diffs: [{ file: "src/parser.ts", patch: "updated", additions: 2 }] },
+    })
+    assert.equal(boundaryRangeHash([original]), boundaryRangeHash([later]))
+    const text = later.parts[0] as { text: string }
+    text.text = "Changed user instruction"
+    assert.notEqual(boundaryRangeHash([original]), boundaryRangeHash([later]))
+})

@@ -534,6 +534,9 @@ test("accounting updates in an archived turn reuse the same provider-bound prefi
         time: { ...updated[1].info.time, completed: 20 },
         tokens: { total: 3_300, input: 3_000, output: 300, reasoning: 0 },
     })
+    Object.assign(updated[0].info, {
+        summary: { diffs: [{ file: "src/parser.ts", patch: "updated", additions: 2 }] },
+    })
     const revised = { messages: updated }
     await handler({}, revised)
     const modelContent = (items: WithParts[]) =>

@@ -40,6 +40,9 @@ function semanticMessageInfo(info: WithParts["info"]): Record<string, unknown> {
         "path",
         "time",
     ])
+    // OpenCode accumulates file diffs on an existing user message after the
+    // provider has seen it. This is UI bookkeeping, not a changed user prompt.
+    if (info.role === "user") delete result.summary
     if (info.time?.created !== undefined) result.time = { created: info.time.created }
     return result
 }
