@@ -189,7 +189,7 @@ test("five independent Luna/high chunks complete concurrently and assemble in so
                 if (index === failChunk)
                     return { data: { parts: [{ type: "text", text: "Incomplete checkpoint" }] } }
                 const detail = Array.from(
-                    { length: 25 },
+                    { length: 90 },
                     (_, item) =>
                         `- Decision ${index}.${item} from src/feature-${index}.ts retains context.`,
                 ).join("\n")
@@ -232,6 +232,7 @@ test("five independent Luna/high chunks complete concurrently and assemble in so
     const result = await summarizePrefixChunks(input)
     assert.equal(calls, 5)
     assert.equal(peak, 5)
+    assert.ok(result && result.length > 5 * 4_000, "each sizable chunk must retain more than a one-turn summary")
     assert.ok(result?.includes(`- ${userText}`))
     assert.ok(result!.indexOf("Decision 0.0") < result!.indexOf("Decision 4.0"))
     assert.ok(countTokens(result!) < countTokens(plan.prefixSummary!))

@@ -52,10 +52,24 @@ export interface BoundaryContextOptions {
     minTailMessages?: number
     minTailUserTurns?: number
     recentToolResultBudgetTokens?: number
+    /** Budget for newest whole reasoning parts in the older compacted range. */
+    recentReasoningBudgetTokens?: number
+    /** OpenCode-only: number of latest real assistant text outputs to anchor with reasoning. */
+    recentAssistantOutputs?: number
+    /** OpenCode opt-in: selected tool/reasoning parts survive a last-resort prefix. */
+    preservePrefixBudgets?: boolean
     force?: boolean
     assistantSummaries?: Record<string, string>
     prefixSummary?: string
+    /** OpenCode-only small ready-archive list; stable across replay. */
+    archiveCatalogText?: string
+    /** Compaction ordinal when exact private archiving is enabled. */
+    archiveGeneration?: number
+    /** Last eligible archive ordinal whose wording has a validated handoff. */
+    retirementThrough?: number
     providerReportedTokens?: number
+    /** OpenCode automatic path: only the last completed provider response triggers normal compaction. */
+    triggerFromProviderOnly?: boolean
     /**
      * Token budget for the raw tail, expressed as a floor/ceiling pair. When
      * provided, the whole-turn count-based tail is refined by tokens: the tail
@@ -79,11 +93,13 @@ export interface BoundaryContextOptions {
     collapsePercent?: number
     /**
      * Whether the last-resort prefix summary may run when pruning alone cannot
-     * reach the trigger. `false` leaves `requiresCustomCompaction` unset and
+     * reach the target. `false` leaves `requiresCustomCompaction` unset and
      * lets the caller decide between a rewrite-only or declined answer.
      * Defaults to true.
      */
     prefixSummaryAllowed?: boolean
+    /** Planning-only: retain an existing checkpoint while new turns remain native until Luna is tried. */
+    deferPrefixConsolidation?: boolean
     // The snapshot this plan replaces. Replacement plans treat what the
     // prior plan already pruned as a monotonic floor: applied stages stay
     // applied, tool results the model already lost are not resurrected,
@@ -98,23 +114,50 @@ export interface BoundaryContextPlan {
     contextLimit: number
     beforeTokens: number
     afterPruneTokens: number
+    /** Estimated components of the final transformed request, not intermediate stage totals. */
+    residual?: {
+        rawTailTokens: number
+        protectedPartTokens: number
+        handoffTokens: number
+        otherTokens: number
+        overheadTokens: number
+    }
     overheadTokens: number
     triggerTokens: number
     targetTokens: number
     prefixSummaryAllowed?: boolean
     collapsePercent?: number
     minTailUserTurns?: number
+    recentReasoningBudgetTokens?: number
+    recentAssistantOutputs?: number
+    protectedAssistantItemKeys?: string[]
+    /** Selected assistant text is emitted with the protected prefix parts. */
+    assistantSurvivesPrefix?: boolean
+    /** The complete anchored reasoning interval exceeded the provider window. */
+    anchorReasoningLimited?: boolean
+    preservePrefixBudgets?: boolean
     rawTailStartIndex: number
     rawTailStartMessageId: string
     rawTailItemBoundary?: RawTailItemBoundary
     requiresCustomCompaction: boolean
     preservedToolCallIds: string[]
+    toolSurvivesPrefix?: boolean
+    preservedReasoningItemKeys?: string[]
+    /** Selected older reasoning is actually emitted alongside the prefix. */
+    reasoningSurvivesPrefix?: boolean
+    /** Newest complete, already-pruned prefix turns kept native beside the handoff. */
+    preservedPrefixTurnKeys?: string[]
     transcript: BoundaryTranscriptArtifact
     stages: BoundaryStageReport[]
     summaryJobs: BoundarySummaryJob[]
     assistantSummaryKeys: string[]
+    /** Consecutive older pruned stubs folded into one replayable action record. */
+    stubGroupKeys?: string[][]
     assistantSummaries: Record<string, string>
     prefixSummary?: string
+    archiveCatalogText?: string
+    archiveGeneration?: number
+    retirementThrough?: number
 }
 
 // The durable, replayable subset of a plan. Field shapes are a persistence
@@ -130,6 +173,7 @@ export interface PlanSnapshot {
     transcriptRelativePath: string
     beforeTokens: number
     afterPruneTokens: number
+    residual?: BoundaryContextPlan["residual"]
     // Optional: absent in plans persisted before overhead tracking existed.
     overheadTokens?: number
     triggerTokens: number
@@ -138,11 +182,26 @@ export interface PlanSnapshot {
     prefixSummaryAllowed?: boolean
     collapsePercent?: number
     minTailUserTurns?: number
+    recentReasoningBudgetTokens?: number
+    recentAssistantOutputs?: number
+    protectedAssistantItemKeys?: string[]
+    assistantSurvivesPrefix?: boolean
+    anchorReasoningLimited?: boolean
+    preservePrefixBudgets?: boolean
     requiresCustomCompaction: boolean
     preservedToolCallIds?: string[]
+    toolSurvivesPrefix?: boolean
+    preservedReasoningItemKeys?: string[]
+    /** Absent on older prefix plans whose selected keys were not emitted. */
+    reasoningSurvivesPrefix?: boolean
+    preservedPrefixTurnKeys?: string[]
     assistantSummaryKeys?: string[]
+    stubGroupKeys?: string[][]
     assistantSummaries?: Record<string, string>
     prefixSummary?: string
+    archiveCatalogText?: string
+    archiveGeneration?: number
+    retirementThrough?: number
     stages?: Array<{
         name: string
         label: string
@@ -166,6 +225,7 @@ export function toPlanSnapshot(plan: BoundaryContextPlan): PlanSnapshot {
         transcriptRelativePath: plan.transcript.relativePath,
         beforeTokens: plan.beforeTokens,
         afterPruneTokens: plan.afterPruneTokens,
+        residual: plan.residual,
         overheadTokens: plan.overheadTokens,
         triggerTokens: plan.triggerTokens,
         targetTokens: plan.targetTokens,
@@ -174,11 +234,27 @@ export function toPlanSnapshot(plan: BoundaryContextPlan): PlanSnapshot {
             : {}),
         ...(plan.collapsePercent !== undefined ? { collapsePercent: plan.collapsePercent } : {}),
         ...(plan.minTailUserTurns !== undefined ? { minTailUserTurns: plan.minTailUserTurns } : {}),
+        ...(plan.recentReasoningBudgetTokens !== undefined
+            ? { recentReasoningBudgetTokens: plan.recentReasoningBudgetTokens }
+            : {}),
+        recentAssistantOutputs: plan.recentAssistantOutputs,
+        protectedAssistantItemKeys: plan.protectedAssistantItemKeys,
+        assistantSurvivesPrefix: plan.assistantSurvivesPrefix,
+        anchorReasoningLimited: plan.anchorReasoningLimited,
+        preservePrefixBudgets: plan.preservePrefixBudgets,
         requiresCustomCompaction: plan.requiresCustomCompaction,
         preservedToolCallIds: plan.preservedToolCallIds,
+        toolSurvivesPrefix: plan.toolSurvivesPrefix,
+        preservedReasoningItemKeys: plan.preservedReasoningItemKeys,
+        reasoningSurvivesPrefix: plan.reasoningSurvivesPrefix,
+        preservedPrefixTurnKeys: plan.preservedPrefixTurnKeys,
         assistantSummaryKeys: plan.assistantSummaryKeys,
+        stubGroupKeys: plan.stubGroupKeys,
         assistantSummaries: plan.assistantSummaries,
         prefixSummary: plan.prefixSummary,
+        archiveCatalogText: plan.archiveCatalogText,
+        archiveGeneration: plan.archiveGeneration,
+        retirementThrough: plan.retirementThrough,
         stages: plan.stages,
         createdAt: Date.now(),
     }

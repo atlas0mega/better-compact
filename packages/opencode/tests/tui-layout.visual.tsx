@@ -243,6 +243,44 @@ test("progress first frame includes correlated stages and context meters", async
     }
 })
 
+test("running progress does not present an intermediate stage spike as outgoing context", async () => {
+    const job: BoundaryJobProgress = {
+        id: "bc_stage_spike",
+        sessionId: "session-1",
+        status: "running",
+        currentStage: "Synthesizing archive handoff",
+        percent: 73,
+        stages: BOUNDARY_PROGRESS_STAGES.map((stage) => ({ ...stage, status: "pending" })),
+        logs: [],
+        counters: {
+            beforeTokens: 192_335,
+            currentTokens: 262_800,
+            afterTokens: 75_500,
+            contextLimit: 262_144,
+        },
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+    }
+    const setup = await renderHosted(
+        () => (
+            <HostDialog width={120} height={40}>
+                <ProgressDialog api={api as never} job={job} now={job.startedAt} spinner="◐" />
+            </HostDialog>
+        ),
+        120,
+        40,
+    )
+    try {
+        const frame = setup.captureCharFrame()
+        expect(frame).toContain("Plan projection")
+        expect(frame).toContain("75.5K / 262.1K")
+        expect(frame).toContain("116.8K")
+        expect(frame).not.toContain("262.8K")
+    } finally {
+        setup.renderer.destroy()
+    }
+})
+
 test("normal-Bun progress controller renders matching completion and stops", async () => {
     const startedAt = Date.now()
     const initialJob: BoundaryJobProgress = {

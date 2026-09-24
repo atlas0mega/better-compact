@@ -92,6 +92,13 @@
                             "default": 40000,
                             "description": "Recent tool-call/result budget to keep verbatim. Older output remains available through transcript references."
                         },
+                        "recentReasoningTokens": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 200000,
+                            "default": 0,
+                            "description": "Guaranteed base for newest complete reasoning parts outside the raw tail. Allowance is base plus up to 25% of older reasoning beyond the base, with added growth capped at 15% of the detected model context."
+                        },
                         "summarizerConcurrency": {
                             "type": "number",
                             "minimum": 1,
@@ -179,6 +186,13 @@
                                         "default": 40000,
                                         "description": "Recent tool-call/result budget to keep verbatim. Older output remains available through transcript references."
                                     },
+                                    "recentReasoningTokens": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 200000,
+                                        "default": 0,
+                                        "description": "Guaranteed base for newest complete reasoning parts outside the raw tail. Allowance is base plus up to 25% of older reasoning beyond the base, with added growth capped at 15% of the detected model context."
+                                    },
                                     "summarizerConcurrency": {
                                         "type": "number",
                                         "minimum": 1,
@@ -230,6 +244,7 @@
                     "triggerPercent": 85,
                     "targetPercent": 35,
                     "recentToolTokens": 40000,
+                    "recentReasoningTokens": 0,
                     "summarizerConcurrency": 4,
                     "prefixSummary": false,
                     "collapsePercent": 25
@@ -319,6 +334,13 @@
                             "maximum": 200000,
                             "default": 40000,
                             "description": "Recent tool-call/result budget to keep verbatim. Older output remains available through transcript references."
+                        },
+                        "recentReasoningTokens": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 200000,
+                            "default": 0,
+                            "description": "Guaranteed base for newest complete reasoning parts outside the raw tail. Allowance is base plus up to 25% of older reasoning beyond the base, with added growth capped at 15% of the detected model context."
                         },
                         "summarizerConcurrency": {
                             "type": "number",

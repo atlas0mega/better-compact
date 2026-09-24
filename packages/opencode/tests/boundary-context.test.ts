@@ -17,6 +17,7 @@ import {
     applyBoundaryPlanSnapshot,
     adaptiveTailUserTurns,
     buildBoundaryContextPlan,
+    efficientAgenticTailBudget,
     processBoundaryTransform,
     toBoundaryPlanSnapshot,
     writeBoundaryTranscript,
@@ -57,6 +58,61 @@ function message(
         parts,
     }
 }
+
+test("local plan size prices fresh tool results without inventing a provider overhead offset", () => {
+    const prior = [
+        message("old-user", "user", [textPart("old-user", "Remember violet widgets")], 1),
+        message("old-assistant", "assistant", [textPart("old-assistant", "Earlier work")], 2),
+        message("current-user", "user", [textPart("current-user", "Read synthetic evidence")], 3),
+    ]
+    const current = message(
+        "current-assistant",
+        "assistant",
+        [textPart("current-assistant", "Checking")],
+        4,
+    )
+    Object.assign(current.info, {
+        tokens: {
+            total: 4_000,
+            input: 900,
+            output: 100,
+            reasoning: 0,
+            cache: { read: 3_000, write: 0 },
+        },
+    })
+    const messages = [...prior, current]
+    current.parts.push({
+        id: "new-tool-result",
+        messageID: current.info.id,
+        sessionID,
+        type: "tool",
+        callID: "read-synthetic",
+        tool: "read",
+        state: {
+            status: "completed",
+            input: { filePath: "synthetic.txt" },
+            output: "fresh tool output ".repeat(5_000),
+            title: "read",
+            metadata: {},
+            time: { start: 4, end: 5 },
+        },
+    } as WithParts["parts"][number])
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 20_000,
+        providerReportedTokens: 4_000,
+        force: true,
+    })
+    assert.ok(plan)
+    assert.equal(plan.beforeTokens, 4_000)
+    assert.equal(plan.overheadTokens, 0)
+    const outgoing = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(outgoing, toBoundaryPlanSnapshot(plan, messages), {
+            allowRegrown: true,
+        }),
+    )
+    assert.equal(plan.afterPruneTokens, openCodeCodec.estimateTurns(openCodeCodec.encode(outgoing)))
+})
 
 test("ignored Better Compact messages do not count as protected user turns", () => {
     const messages = [
@@ -232,6 +288,110 @@ test("Syndicate plugin prompts obey tool retention while real user instructions 
     assert.ok(!cleanedText.text.includes(oldText))
     assert.ok(!cleanedText.text.includes(recentText))
     assert.ok(cleanedText.text.includes("Keep this original instruction exactly."))
+})
+
+test("Sol headroom prioritizes real user wording and more than five assistant answers over injected prompts", () => {
+    const suffix = "\n\n[plugin-injection:12345678-1234-4234-8234-123456789abc]"
+    const messages = [
+        message(
+            "human-original",
+            "user",
+            [textPart("human-original", "Preserve my original requirement exactly")],
+            1,
+        ),
+        ...Array.from({ length: 64 }, (_, index) =>
+            message(
+                `loop-tool-${index}`,
+                "assistant",
+                [
+                    {
+                        id: `loop-tool-${index}-part`,
+                        messageID: `loop-tool-${index}`,
+                        sessionID,
+                        type: "tool",
+                        callID: `call-loop-${index}`,
+                        tool: "bash",
+                        state: {
+                            status: "completed",
+                            input: { command: `check-${index}` },
+                            output: `Archived result ${index}: ${"detail ".repeat(170)}`,
+                            title: "bash",
+                            metadata: {},
+                            time: { start: index + 2, end: index + 3 },
+                        },
+                    } as WithParts["parts"][number],
+                ],
+                index + 2,
+            ),
+        ),
+        message(
+            "injected-old",
+            "user",
+            [textPart("injected-old", `Generated notice ${"payload ".repeat(400)}${suffix}`)],
+            90,
+        ),
+        ...Array.from({ length: 25 }, (_, index) =>
+            message(
+                `answer-${index}`,
+                "assistant",
+                [
+                    textPart(
+                        `answer-${index}`,
+                        `Assistant answer ${index}: ${"confirmed decision ".repeat(100)}`,
+                    ),
+                ],
+                index + 91,
+            ),
+        ),
+        message(
+            "human-current",
+            "user",
+            [textPart("human-current", "Preserve my current correction exactly")],
+            200,
+        ),
+        message(
+            "injected-latest",
+            "user",
+            [textPart("injected-latest", `Generated after human ${suffix}`)],
+            201,
+        ),
+    ]
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 80_000,
+        targetTokens: 8_000,
+        force: true,
+        minTailUserTurns: 1,
+        collapsePercent: 1,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        archiveCatalogText: "- c000001 — Earlier session details",
+    })
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.equal(plan.rawTailStartMessageId, "human-current")
+    const applied = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(applied, toBoundaryPlanSnapshot(plan, messages), {
+            allowRegrown: true,
+        }),
+    )
+    const rawChat = applied.filter(
+        (item) =>
+            item.info.role === "assistant" &&
+            item.parts.some(
+                (part) => part.type === "text" && part.text.startsWith("Assistant answer "),
+            ),
+    )
+    assert.ok(rawChat.length > 5, `only ${rawChat.length} assistant answers survived`)
+    assert.ok(plan.afterPruneTokens >= plan.targetTokens * 0.8)
+    assert.ok(plan.afterPruneTokens <= plan.targetTokens)
+    assert.match(plan.prefixSummary ?? "", /Preserve my original requirement exactly/)
+    assert.ok(!plan.prefixSummary?.includes("Generated notice"))
+    assert.ok(plan.preservedPrefixTurnKeys?.includes("human-original"))
+    assert.ok(!plan.preservedPrefixTurnKeys?.includes("injected-old"))
+    assert.equal(applied.find((item) => item.info.id === "human-original")?.parts[0]?.type, "text")
+    assert.equal(applied.find((item) => item.info.id === "human-current")?.parts[0]?.type, "text")
+    const injected = applied.find((item) => item.info.id === "injected-old")?.parts[0]
+    if (injected?.type === "text") assert.match(injected.text, /Historical generated prompt pruned/)
 })
 
 test("an older cached plan containing plugin prompts replans below trigger once", async () => {
@@ -548,6 +708,17 @@ test("prefix summary keeps only the latest goal continuation even when objective
 
     const plan = buildBoundaryContextPlan(messages, { contextLimit: 500, force: true })
     assert.ok(plan?.requiresCustomCompaction)
+    for (const id of ["u-1", "u-3", "u-4", "u-5"]) {
+        assert.equal(
+            openCodeCodec.encode([messages.find((item) => item.info.id === id)!])[0]
+                .generatedTaskState,
+            true,
+        )
+        assert.ok(
+            !plan.preservedPrefixTurnKeys?.includes(id),
+            `${id} is task state, not a reserved human turn`,
+        )
+    }
     assert.ok(plan.prefixSummary?.includes(latest))
     assert.ok(!plan.prefixSummary?.includes(first))
     assert.ok(!plan.prefixSummary?.includes(second))
@@ -571,6 +742,21 @@ test("prefix summary keeps only the latest goal continuation even when objective
     assert.ok(!replacement.prefixSummary.includes(second))
     assert.ok(!replacement.prefixSummary.includes(different))
     assert.ok(replacement.prefixSummary.includes("Please keep this instruction exactly."))
+
+    const legacyWithNativeGoals = {
+        ...legacySnapshot,
+        preservedPrefixTurnKeys: ["u-1", "u-3", "u-4", "u-5"],
+    }
+    const migrated = buildBoundaryContextPlan(messages, {
+        contextLimit: 500,
+        force: true,
+        priorPlan: legacyWithNativeGoals,
+    })
+    assert.ok(migrated)
+    for (const id of ["u-1", "u-3", "u-4"]) {
+        assert.ok(!migrated.preservedPrefixTurnKeys?.includes(id), `${id} was superseded`)
+    }
+    assert.ok(migrated.prefixSummary?.includes(latest))
 
     const replayed = structuredClone(messages)
     assert.ok(applyBoundaryPlanSnapshot(replayed, legacySnapshot, { allowRegrown: true }))
@@ -601,6 +787,8 @@ test("prefix summary keeps only the latest goal continuation even when objective
         turns: openCodeCodec.encode(messages),
         contextLimit: 500,
         triggerTokens: cached.triggerTokens,
+        preservePrefixBudgets: true,
+        recentAssistantOutputs: 5,
     })
     assert.equal(result.outcome, "replayed")
     assert.ok(saved?.prefixSummary?.includes(latest))
@@ -616,6 +804,38 @@ test("prefix summary keeps only the latest goal continuation even when objective
     const summary = formatPrefixSummary(prefix, openCodeConventions, rawTail)
     assert.ok(!summary.includes("Continue working toward the active session goal."))
     assert.ok(summary.includes("Please keep this instruction exactly."))
+
+    const withAutoContinuation = [
+        ...messages,
+        message(
+            "u-auto",
+            "user",
+            [textPart("u-auto", goalContinuation("active task now", 50))],
+            14,
+        ),
+        message("a-auto", "assistant", [textPart("a-auto", "Continuing the work")], 15),
+    ]
+    const live = buildBoundaryContextPlan(withAutoContinuation, {
+        contextLimit: 20_000,
+        force: true,
+        minTailUserTurns: 1,
+    })
+    assert.ok(live)
+    assert.equal(
+        live.rawTailStartMessageId,
+        "u-7",
+        "automatic goal prompts do not start a new human tail",
+    )
+    const outgoing = structuredClone(withAutoContinuation)
+    assert.ok(
+        applyBoundaryPlanSnapshot(outgoing, toBoundaryPlanSnapshot(live, withAutoContinuation), {
+            allowRegrown: true,
+        }),
+    )
+    assert.ok(
+        outgoing.some((item) => item.info.id === "u-auto"),
+        "latest active goal stays live",
+    )
 })
 
 test("split plans omit whole-message fork identity", () => {
@@ -661,6 +881,185 @@ test("split plans omit whole-message fork identity", () => {
     const snapshot = toBoundaryPlanSnapshot(plan, messages)
     assert.equal(snapshot.prefixFingerprint, undefined)
     assert.equal(snapshot.compactedMessageCount, undefined)
+})
+
+test("OpenCode's last-resort handoff retains selected native reasoning and tools through replay", () => {
+    const messages: WithParts[] = []
+    for (let index = 0; index < 5; index++) {
+        const user = `reason-user-${index}`
+        const assistant = `reason-assistant-${index}`
+        messages.push(
+            message(user, "user", [textPart(user, `Instruction ${index}`)], index * 2 + 1),
+        )
+        messages.push(
+            message(
+                assistant,
+                "assistant",
+                [
+                    {
+                        id: `${assistant}-reasoning`,
+                        messageID: assistant,
+                        sessionID,
+                        type: "reasoning",
+                        text:
+                            `Distinct reasoning ${index}: ` +
+                            "important working detail ".repeat(100),
+                        time: { start: index * 2 + 2, end: index * 2 + 3 },
+                    } as WithParts["parts"][number],
+                    textPart(assistant, `Decision ${index}`),
+                    {
+                        id: `${assistant}-tool`,
+                        messageID: assistant,
+                        sessionID,
+                        type: "tool",
+                        callID: `${assistant}-call`,
+                        tool: "read",
+                        state: {
+                            status: "completed",
+                            input: { filePath: `src/${index}.ts` },
+                            output: `Retained tool result ${index}: ` + "working data ".repeat(80),
+                            title: "read",
+                            metadata: {},
+                            time: { start: 1, end: 2 },
+                        },
+                    } as WithParts["parts"][number],
+                ],
+                index * 2 + 2,
+            ),
+        )
+    }
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 100_000,
+        force: true,
+        triggerTokens: 1,
+        targetTokens: 1_000,
+        prefixSummaryAllowed: true,
+        recentReasoningBudgetTokens: 2_000,
+        recentToolResultBudgetTokens: 2_000,
+        archiveCatalogText: "- c000001-123456789abc — Current task history",
+    })
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.equal(plan.reasoningSurvivesPrefix, true)
+    assert.equal(plan.toolSurvivesPrefix, true)
+    const selected = new Set(plan.preservedReasoningItemKeys)
+    const selectedTools = new Set(plan.preservedToolCallIds)
+    assert.ok(selected.size)
+    assert.ok(selectedTools.size)
+    assert.ok(plan.residual)
+    assert.ok(plan.residual.protectedPartTokens > 0)
+    assert.ok(plan.residual.handoffTokens > 0)
+    assert.equal(
+        Object.values(plan.residual).reduce((sum, tokens) => sum + tokens, 0),
+        plan.afterPruneTokens,
+    )
+    assert.deepEqual(toBoundaryPlanSnapshot(plan, messages).residual, plan.residual)
+    const outgoing = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(outgoing, toBoundaryPlanSnapshot(plan, messages), {
+            allowRegrown: true,
+        }),
+    )
+    const retained = outgoing
+        .flatMap((entry) => entry.parts)
+        .filter((part) => part.type === "reasoning" && selected.has(part.id))
+    assert.equal(retained.length, selected.size)
+    assert.ok(
+        retained.every(
+            (part) => part.type === "reasoning" && part.text.includes("important working detail"),
+        ),
+    )
+    const retainedTools = outgoing
+        .flatMap((entry) => entry.parts)
+        .filter((part) => part.type === "tool" && selectedTools.has(part.callID))
+    assert.equal(retainedTools.length, selectedTools.size)
+    assert.ok(
+        retainedTools.every(
+            (part) =>
+                part.type === "tool" &&
+                part.state.status === "completed" &&
+                part.state.output.includes("Retained tool result"),
+        ),
+    )
+    assert.equal(
+        plan.afterPruneTokens,
+        openCodeCodec.estimateTurns(openCodeCodec.encode(outgoing)) + plan.overheadTokens,
+    )
+    const replay = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(replay, toBoundaryPlanSnapshot(plan, messages), {
+            allowRegrown: true,
+        }),
+    )
+    assert.deepEqual(replay, outgoing)
+})
+
+test("a long assistant/tool loop advances a whole-turn archive boundary only when the complete plan shrinks", () => {
+    const messages = [
+        message("u-old", "user", [textPart("u-old", "Start implementation")], 1),
+        message("a-old", "assistant", [textPart("a-old", "Earlier decision")], 2),
+        message("u-middle", "user", [textPart("u-middle", "Check tests")], 3),
+        message("a-middle", "assistant", [textPart("a-middle", "Tests checked")], 4),
+        message(
+            "u-active",
+            "user",
+            [textPart("u-active", "Keep working on the current requirement")],
+            5,
+        ),
+    ]
+    for (let index = 0; index < 40; index++) {
+        const id = `a-loop-${index}`
+        messages.push(
+            message(
+                id,
+                "assistant",
+                [
+                    {
+                        id: `${id}-tool`,
+                        messageID: id,
+                        sessionID,
+                        type: "tool",
+                        callID: `${id}-call`,
+                        tool: "read",
+                        state: {
+                            status: "completed",
+                            input: { filePath: `src/${index}.ts` },
+                            output: `Unique tool detail ${index}: ` + "large result ".repeat(1_000),
+                            title: "read",
+                            metadata: {},
+                            time: { start: 1, end: 2 },
+                        },
+                    } as any,
+                ],
+                index + 6,
+            ),
+        )
+    }
+    const options = {
+        contextLimit: 100_000,
+        triggerTokens: 1,
+        targetTokens: 18_000,
+        recentToolResultBudgetTokens: 0,
+        minTailUserTurns: 1,
+        force: true,
+        archiveCatalogText: "",
+        prefixSummaryAllowed: true,
+    }
+    const budget = efficientAgenticTailBudget(messages, options)
+    assert.ok(budget, "a target-sized whole-turn tail must beat the old user-anchored plan")
+    const baseline = buildBoundaryContextPlan(messages, options)
+    const selected = buildBoundaryContextPlan(messages, { ...options, tailBudgetTokens: budget })
+    assert.ok(baseline && selected)
+    assert.ok(selected.afterPruneTokens < baseline.afterPruneTokens)
+    assert.ok(selected.rawTailStartIndex > 5, "the boundary must advance past the latest user turn")
+    assert.ok(selected.transcript.messageIds.includes("a-loop-0"))
+    const transformed = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(transformed, toBoundaryPlanSnapshot(selected, messages), {
+            allowRegrown: true,
+        }),
+    )
+    assert.doesNotMatch(JSON.stringify(transformed), /Unique tool detail 0:/)
+    assert.match(JSON.stringify(transformed), /Keep working on the current requirement/)
 })
 
 test("boundary transcript is lossless and private", async () => {

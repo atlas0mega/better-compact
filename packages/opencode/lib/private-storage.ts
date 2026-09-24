@@ -57,6 +57,24 @@ export async function writePrivateFile(
     }
 }
 
+/** Open only a regular private file contained in the trusted project root. */
+export async function readPrivateFile(path: string, root: string): Promise<string> {
+    await assertNoSymlinkPath(root, path)
+    const rootReal = await fs.realpath(root)
+    const fileReal = await fs.realpath(path)
+    const contained = relative(rootReal, fileReal)
+    if (contained === ".." || contained.startsWith(`..${sep}`) || isAbsolute(contained)) {
+        throw new Error("Better Compact private file escapes its root")
+    }
+    const handle = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+        if (!(await handle.stat()).isFile()) throw new Error("Better Compact private path is not a file")
+        return await handle.readFile({ encoding: "utf8" })
+    } finally {
+        await handle.close()
+    }
+}
+
 export async function securePrivateFile(path: string): Promise<void> {
     await fs.chmod(path, 0o600)
 }

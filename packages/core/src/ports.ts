@@ -1,4 +1,4 @@
-import type { BoundarySummaryJob, PlanSnapshot } from "./plan"
+import type { BoundaryContextPlan, BoundarySummaryJob, PlanSnapshot } from "./plan"
 
 export interface Logger {
     info(message: string, data?: unknown): unknown
@@ -34,4 +34,6 @@ export interface EnginePorts {
     transcripts: TranscriptStore
     plans: PlanStore
     logger: Logger
+    /** Optional host-owned exact delta; commit it before the virtual plan. */
+    archive?(plan: BoundaryContextPlan): Promise<void>
 }

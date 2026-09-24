@@ -9,9 +9,15 @@ import {
 } from "../config"
 import { Logger } from "../logger"
 import { filterMessages } from "../messages/shape"
-import { createSessionState, type BoundaryJobProgress, type SessionState, type WithParts } from "../state"
+import {
+    createSessionState,
+    type BoundaryJobProgress,
+    type SessionState,
+    type WithParts,
+} from "../state"
 import { loadSessionState } from "../state/persistence"
 import { findLastCompactionTimestamp } from "../state/utils"
+import { createBoundaryJob } from "../boundary/progress"
 import type { TuiApi } from "./types"
 
 export const logger = new Logger(false)
@@ -37,7 +43,9 @@ export function loadTuiCompactionSettings(api: TuiApi, config: PluginConfig): Co
     return {
         automatic: stored?.automatic ?? config.compaction.automatic,
         preset: normalizePreset(stored?.preset ?? config.compaction.preset),
-        summaryEffort: normalizeSummaryEffort(stored?.summaryEffort ?? config.compaction.summaryEffort),
+        summaryEffort: normalizeSummaryEffort(
+            stored?.summaryEffort ?? config.compaction.summaryEffort,
+        ),
         custom: normalizeCompactionCustom({
             ...config.compaction.custom,
             ...(stored?.custom ?? {}),
@@ -47,11 +55,41 @@ export function loadTuiCompactionSettings(api: TuiApi, config: PluginConfig): Co
 
 export async function loadBoundaryJob(sessionID: string): Promise<BoundaryJobProgress | null> {
     const persisted = await loadSessionState(sessionID, logger)
-    const job = persisted?.boundary?.job
+    return queuedBoundaryJob(sessionID, persisted?.boundary?.job, persisted?.boundary?.queuedManual)
+}
+
+export function queuedBoundaryJob(
+    sessionID: string,
+    job: BoundaryJobProgress | null | undefined,
+    queued: SessionState["boundary"]["queuedManual"],
+): BoundaryJobProgress | null {
+    if (
+        queued?.jobId &&
+        queued.jobStartedAt &&
+        (!job || job.id !== queued.jobId || job.startedAt < queued.jobStartedAt)
+    ) {
+        const waiting = createBoundaryJob({
+            sessionId: sessionID,
+            id: queued.jobId,
+            startedAt: queued.jobStartedAt,
+            counters: {
+                beforeTokens: queued.currentTokens,
+                currentTokens: queued.currentTokens,
+                contextLimit: queued.contextLimit,
+            },
+        })
+        waiting.currentStage = "Queued until the active turn finishes"
+        waiting.logs = ["Queued; waiting for an eligible assistant/tool step or session idle."]
+        waiting.updatedAt = Math.max(waiting.updatedAt, queued.requestedAt)
+        return waiting
+    }
     return job?.sessionId === sessionID ? job : null
 }
 
-export function currentContextUsage(api: TuiApi, sessionID: string): {
+export function currentContextUsage(
+    api: TuiApi,
+    sessionID: string,
+): {
     tokens: number
     limit: number
     providerID?: string
@@ -59,31 +97,37 @@ export function currentContextUsage(api: TuiApi, sessionID: string): {
     variant?: string
 } {
     const messages = api.state.session.messages(sessionID)
-    const last = [...messages].reverse().find((message: any) => message.role === "assistant" && message.tokens?.output > 0) as any
-    if (!last) return { tokens: 0, limit: 0 }
-    const tokens =
-        typeof last.tokens?.total === "number" && Number.isFinite(last.tokens.total)
-            ? last.tokens.total
-            : (last.tokens?.input ?? 0) +
-              (last.tokens?.output ?? 0) +
-              (last.tokens?.reasoning ?? 0) +
-              (last.tokens?.cache?.read ?? 0) +
-              (last.tokens?.cache?.write ?? 0)
+    const last = [...messages]
+        .reverse()
+        .find((message: any) => message.role === "assistant" && message.tokens?.output > 0) as any
     const active = activeSessionModel(api, sessionID)
-    const providerID = active?.providerID ?? last.providerID
-    const modelID = active?.modelID ?? last.modelID
+    if (!last && !active) return { tokens: 0, limit: 0 }
+    const tokens =
+        typeof last?.tokens?.total === "number" && Number.isFinite(last.tokens.total)
+            ? last.tokens.total
+            : (last?.tokens?.input ?? 0) +
+              (last?.tokens?.output ?? 0) +
+              (last?.tokens?.reasoning ?? 0) +
+              (last?.tokens?.cache?.read ?? 0) +
+              (last?.tokens?.cache?.write ?? 0)
+    const providerID = active?.providerID ?? last?.providerID
+    const modelID = active?.modelID ?? last?.modelID
     const provider = api.state.provider.find((item) => item.id === providerID)
     const limit = provider?.models?.[modelID]?.limit?.context ?? 0
     return { tokens, limit, providerID, modelID, variant: active?.variant }
 }
 
-export function availableSummaryEfforts(api: TuiApi, sessionID: string | undefined): Set<SummaryEffort> {
+export function availableSummaryEfforts(
+    api: TuiApi,
+    sessionID: string | undefined,
+): Set<SummaryEffort> {
     const available = new Set<SummaryEffort>(["inherit"])
     if (!sessionID) return available
     const active = activeSessionModel(api, sessionID)
     if (!active) return available
     const provider = api.state.provider.find((item) => item.id === active?.providerID)
-    const model = provider?.models?.[active.modelID] as unknown as { variants?: Record<string, unknown> } | undefined
+    const model = provider?.models?.[active.modelID] as unknown as
+        { variants?: Record<string, unknown> } | undefined
     const variants = new Set(Object.keys(model?.variants ?? {}))
     if (variants.has("low")) available.add("low")
     if (variants.has("medium")) available.add("medium")
@@ -101,7 +145,8 @@ export function resolveSummaryVariant(
     const active = activeSessionModel(api, sessionID)
     if (!active) return undefined
     const provider = api.state.provider.find((item) => item.id === active?.providerID)
-    const model = provider?.models?.[active.modelID] as unknown as { variants?: Record<string, unknown> } | undefined
+    const model = provider?.models?.[active.modelID] as unknown as
+        { variants?: Record<string, unknown> } | undefined
     const variants = new Set(Object.keys(model?.variants ?? {}))
     const candidates = effort === "max" ? ["max", "xhigh"] : [effort]
     return candidates.find((candidate) => variants.has(candidate))
@@ -111,24 +156,27 @@ function activeSessionModel(
     api: TuiApi,
     sessionID: string,
 ): { providerID: string; modelID: string; variant?: string } | undefined {
-    const session = api.state.session.get(sessionID) as unknown as {
-        model?: { id?: string; modelID?: string; providerID?: string; variant?: string }
-    } | undefined
+    const session = api.state.session.get(sessionID) as unknown as
+        | {
+              model?: { id?: string; modelID?: string; providerID?: string; variant?: string }
+          }
+        | undefined
     const providerID = session?.model?.providerID
     const modelID = session?.model?.id ?? session?.model?.modelID
     if (typeof providerID === "string" && typeof modelID === "string") {
         return {
             providerID,
             modelID,
-            variant: typeof session?.model?.variant === "string" ? session.model.variant : undefined,
+            variant:
+                typeof session?.model?.variant === "string" ? session.model.variant : undefined,
         }
     }
 
     const messages = api.state.session.messages(sessionID)
-    const last = [...messages].reverse().find((message: any) => message.role === "assistant" && message.modelID) as any
-    return last
-        ? { providerID: last.providerID, modelID: last.modelID }
-        : undefined
+    const last = [...messages]
+        .reverse()
+        .find((message: any) => message.role === "assistant" && message.modelID) as any
+    return last ? { providerID: last.providerID, modelID: last.modelID } : undefined
 }
 
 export function sessionMessages(api: TuiApi, sessionID: string): WithParts[] {

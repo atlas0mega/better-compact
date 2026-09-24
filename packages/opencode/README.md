@@ -94,13 +94,24 @@ JSONC files are preserved when present.
 
 ## Commands
 
-| Command                    | Action                 |
-| -------------------------- | ---------------------- |
-| `/better-compact`          | Run Better Compact now |
-| `/better-compact context`  | Show context usage     |
-| `/better-compact stats`    | Show the active plan   |
-| `/better-compact help`     | List commands          |
-| `/better-compact-settings` | Open settings          |
+| Command                    | Action                                                          |
+| -------------------------- | --------------------------------------------------------------- |
+| `/better-compact`          | Run now if idle; otherwise queue once after the active turn     |
+| `/better-compact context`  | Show context usage                                              |
+| `/better-compact stats`    | Show the active plan                                            |
+| `/better-compact help`     | List commands                                                   |
+| `/better-compact-settings` | Open settings                                                   |
+| `/compact`, `/summarize`   | TUI aliases for `/better-compact` when its TUI plugin is loaded |
+
+When requested during an active assistant/tool loop, manual compaction waits for the
+next completed assistant/tool step and finishes before the following provider request;
+idle handles a completed terminal turn. The command's
+no-reply messages keep the session's current agent, model, and variant; a separate
+summary-model effort does not change the conversation variant.
+The TUI plugin shadows OpenCode's native `session.compact` command at higher keymap
+priority, including its `/summarize` alias. This redirect does not disable native
+compaction invoked directly through OpenCode's API. Restart a running TUI to load
+plugin code changes.
 
 ## Configuration
 
@@ -149,36 +160,96 @@ to `null` to use the active chat model for that scope. When switching models,
 `summaryEffort: "inherit"` uses the summary model's default variant rather than carrying
 over the conversation model's variant.
 
-For OpenCode scratch summaries, selected assistant turns are spread across up to five
-model calls per compaction. The call count scales with estimated input size; each call
-targets 12k input tokens and is capped at approximately 24k and 16 turns. Jobs beyond
-that budget keep the deterministic summary and transcript reference. The calls can run
-in parallel up to `compaction.custom.summarizerConcurrency`. Responses contain one
-validated summary per turn, with a batch-wide output target that grows sublinearly
-with the turn count. Three failed calls in a row pause further summary calls for five
-minutes; that failure cooldown is separate from the per-compaction five-call limit.
-If the validated batch would make the active context larger than the
-deterministic plan, Better Compact retains the smaller plan. Original turns
-remain in the citable transcript, and replay keeps the same transformed
-prefix for prompt caching; the target remains best-effort.
+The TUI manual command uses `noReply: false` when the session is busy, joining
+OpenCode's existing run; an idle invocation uses `noReply: true` and does not
+start a chat turn. A busy manual request executes once after the assistant or
+tool content advances, in the awaited pre-provider transform before the same
+agent loop continues, or on `session.idle` when the turn terminates. An
+unchanged queuing prompt alone does not activate it.
 
-The first last-resort prefix also needs synthesis: simply listing hundreds of
-assistant-turn previews can itself exceed the target. Better Compact splits that
-chronological progress into up to five roughly equal-sized, complete chunks,
-preferring about 23k estimated input tokens per call. When five calls at that
-size cannot cover the entire history, the chunks grow evenly up to the
-configured summary model's context limit, with headroom reserved for instructions
-and output. The calls run concurrently and assemble the six task-state sections
-in original order.
-Each chunk retains its transcript reference; original user instructions are
-inserted verbatim from the source turns, never rewritten by the summarizer.
-The plan is stored only if **all** chunks validate and the assembled prefix is
-smaller. If the history cannot fit in five calls within the summary model's
-context window, its context limit is unavailable, or a response fails, the
-deterministic prefix stays in place—no historical slice is silently omitted.
-Older cached deterministic prefixes get one upgrade attempt per unchanged range
-and summary model, including when a previous attempt used the fixed-size chunks,
-including below the trigger; accepted plans replay byte-stably for caching.
+Automatic triggering uses the last completed provider response's reported
+tokens, including in agent/tool loops; it does not infer a trigger from the
+raw stored transcript. An outgoing request estimated beyond the model window
+still uses the separate forced overflow guard. Planning prices the transformed
+messages on one local scale; the previous provider reading is not subtracted
+from a reconstructed history and added back as imaginary fixed overhead.
+The report distinguishes local projected history from the provider reading,
+which updates after the next response and may include unpriced system/tool
+schemas and provider accounting.
+
+In OpenCode's archive workflow, deterministic pruning comes first. The
+25% target in the current live configuration is best-effort: a new last-resort
+prefix starts only above 115% of the target. It retains the newest complete
+pruned turns natively in available projected context, counting protected
+reasoning, tools, the handoff, and raw tail together. OpenCode also
+anchors its last five real assistant text outputs with the reasoning between
+them, excluding tool calls. **Five is a reasoning-span anchor, not a cap on
+assistant chat:** after reserving genuine user wording, additional whole
+assistant responses can remain native up to the projected target before old
+stubs and tool traffic consume the remaining headroom. Provenance-marked
+Syndicate plugin injections are generated, tool-like traffic, not human turns
+or user-first retention. The shared injection-body helper used by the ZIP's
+enforcers and `teams-md` appends the provenance marker; the OpenCode adapter
+classifies those messages in one reusable helper. Older genuine human turns
+get a model-scaled native reserve of up to 40% of the target (10% of the
+context window at a 25% target), limited by the actual remaining headroom
+after the current raw tail, handoff, and protected parts. If older turns exceed
+that reserve, the newest complete ones win; the handoff carries task intent
+and the exact older wording remains in the private archive for recall. The
+current raw user turn and previously native wording awaiting a validated
+handoff are never cut for this reserve. A goal-plugin automatic continuation
+or limit notice is also excluded from the human reserve and user-tail boundary,
+while its latest objective/state remains in the live task handoff (or current
+raw tail); it is not discarded as routine
+tool output. Projected tokens can differ from the next provider reading. A
+provider-window buffer reserves room for the next response; if the reasoning
+interval cannot fit, the outputs remain native and reasoning falls back to its
+28k allowance, with the limit reported.
+A previously applied prefix remains stable on replay. The
+Luna/high **live handoff** runs synchronously before the next provider request
+only when the resulting plan exceeds 115% of the target. It may use at most
+six calls (up to five balanced concurrent source chunks plus one final handoff).
+Archive descriptions are separate Luna/default jobs that run in the background;
+the two paths share **at most seven calls per compaction**, including retries.
+Each failed job may be attempted at most five times while slots remain. Small
+evidence (about 23k estimated input tokens or less) needs only one live-handoff
+call. Larger evidence uses up to five **evenly balanced, concurrent** source
+calls even when the summary model could fit it in one request. Their results
+feed one final grand-summary call; only its validated handoff can replace the
+live prefix. ~23k is a preferred chunk size, not a hard ceiling. A chunk may
+grow to the summary model's detected context limit minus a bounded output
+reserve (24k tokens on large models) and its own prompt overhead. Source
+evidence keeps user wording and assistant decisions but bounds old tool payloads
+and reasoning; the private archive retains the exact originals. Scratch setup
+and cleanup have 30-second request deadlines; each Luna prompt has a three-minute
+request deadline so a stalled source cannot hold the next provider request
+indefinitely.
+No historical chunk is silently dropped. A failed or non-reducing live handoff
+retains the deterministic handoff and private archive for later recall. Once a
+live handoff validates and makes the **complete** outgoing context smaller, it
+replaces the covered old wording before the next provider call. Background
+descriptions make pending archives ready without changing the active cached plan.
+Stable plan replay makes no additional summary calls.
+The session-scoped `better_compact_recall` tool supports `catalog`, `excerpt`, and
+`page`. If the catalog marks `archivedSummaryAvailable`, an oversized or rejected
+model response is available through `excerpt` or `page` with `artifact: "summary"`
+and that archive ID. This historical output is not a validated live handoff;
+both it and the exact native delta require read permission and bounded paging.
+An unchanged manual command or a settings-only replan does not re-run the live
+handoff on the same boundary. Pending descriptions are retried on plugin startup
+for project catalogs under the cwd, with project-scoped SDK calls and a
+cross-process per-session lock. Exact archive payloads and rejected-summary
+sidecars expire after seven days on project activity or startup; catalog IDs
+remain as tombstones. The latest complete older reasoning parts can be kept
+under `compaction.custom.recentReasoningTokens` (base 28k in the user's setup,
+with growth toward 25% of older reasoning limited by remaining target headroom
+after other retained context); the
+recent raw tail remains protected.
+For long assistant/tool loops with no intervening user message, a target-sized
+whole-turn tail may advance into the loop when the **complete outgoing plan**
+is smaller than the ordinary user-anchored plan. The archived native turns
+remain recoverable by session-scoped recall. Catalog writes are serialized
+across processes so background descriptions cannot erase newly added deltas.
 
 User-role prompts generated by the Syndicate Engine plugins carry a trailing
 `[plugin-injection:<uuid>]` provenance marker. Better Compact recognizes this

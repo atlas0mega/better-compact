@@ -1,5 +1,5 @@
 import { builtinModules, createRequire } from "node:module"
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import path from "node:path"
 import process from "node:process"
@@ -65,6 +65,13 @@ function assertRepoFilesExist() {
             fail(`missing required file: ${relativePath}`)
         }
     }
+}
+
+function assertNoUnpublishedChunks() {
+    const chunks = readdirSync(path.join(root, "dist")).filter(
+        (name) => name.endsWith(".js") && name !== "index.js" && name !== "tui.js",
+    )
+    if (chunks.length) fail(`build emitted JS chunks not included in the published tarball: ${chunks.join(", ")}`)
 }
 
 function assertPackageJsonShape() {
@@ -335,6 +342,7 @@ function validatePackedFiles() {
 }
 
 assertRepoFilesExist()
+assertNoUnpublishedChunks()
 assertPackageJsonShape()
 assertInstallableDependencies()
 validateRuntimeImportGraph()
