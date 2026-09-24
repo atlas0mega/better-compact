@@ -126,12 +126,14 @@ function mockSdk(
             }),
         },
         session: {
-            create: async ({ body }: any) => {
+            create: async ({ body, signal }: any) => {
+                assert.ok(signal instanceof AbortSignal)
                 assert.equal(body.parentID, sessionId)
                 assert.equal(body.agent, "specialist")
                 return { data: { id: `scratch-${++calls}` } }
             },
-            prompt: async ({ body }: any) => {
+            prompt: async ({ body, signal }: any) => {
+                assert.ok(signal instanceof AbortSignal)
                 assert.equal(body.variant, expectedVariant ?? undefined)
                 active++
                 peak = Math.max(peak, active)
@@ -157,7 +159,10 @@ function mockSdk(
                     },
                 }
             },
-            delete: async () => ({ data: true }),
+            delete: async ({ signal }: any) => {
+                assert.ok(signal instanceof AbortSignal)
+                return { data: true }
+            },
         },
     }
     return { sdk, stats: () => ({ calls, peak }) }
@@ -213,11 +218,49 @@ test("one Luna/high call produces a validated live handoff for a fitting delta",
     )
 })
 
-test("a many-message delta above the preferred chunk size still uses one fitting call", async () => {
-    const { result, stats } = await run(380)
+test("a large fitting delta splits evenly across concurrent Luna source calls", async () => {
+    const data = await fixture(380)
+    const { sdk, stats } = mockSdk(data.archiveId, false, 700_000)
+    const sourceInputs: number[] = []
+    const originalPrompt = sdk.session.prompt
+    sdk.session.prompt = async (request: any) => {
+        const prompt = request.body.parts[0].text as string
+        if (prompt.includes("Chronological chunk")) {
+            sourceInputs.push(countTokens(prompt))
+            const response = await originalPrompt(request)
+            response.data.parts[0].text = headings.replace(
+                "Preserved the earlier working design and explained why.",
+                "CHUNK_ONLY_EVIDENCE",
+            )
+            return response
+        }
+        if (prompt.includes("Extracted chronological evidence:"))
+            assert.match(prompt, /CHUNK_ONLY_EVIDENCE/)
+        return originalPrompt(request)
+    }
+    const logger = new Logger(false)
+    const result = await summarizeArchiveBoundary({
+        ...data,
+        client: sdk,
+        runtime: createRuntimeState(sdk, logger),
+        logger,
+        sessionId,
+        params: {
+            providerId: "openai",
+            modelId: "gpt-6-luna",
+            agent: "specialist",
+            variant: "low",
+        },
+        summaryModel: "openai/gpt-6-luna",
+        summaryEffort: "high",
+    })
     assert.ok(result.ok)
-    assert.deepEqual(stats, { calls: 1, peak: 1 })
-    assert.equal(result.calls, 1)
+    assert.ok(sourceInputs.length >= 2 && sourceInputs.length <= 5)
+    assert.equal(stats().calls, sourceInputs.length + 1)
+    assert.equal(stats().peak, sourceInputs.length)
+    assert.ok(Math.max(...sourceInputs) <= Math.min(...sourceInputs) * 1.2)
+    assert.doesNotMatch(result.handoff, /CHUNK_ONLY_EVIDENCE/)
+    assert.match(result.handoff, /Preserved the earlier working design/)
 })
 
 test("live Luna evidence excludes native assistant output, reasoning and tools but the archive retains them", async () => {
@@ -511,7 +554,42 @@ test("bulky raw tool results remain exact in the archive while Luna receives bou
     assert.ok(archive.includes("FULL_TOOL_OUTPUT_".repeat(200)))
 })
 
-test("pruned archive evidence keeps only the latest generated goal continuation", async () => {
+test("a fitting Luna/high handoff receives decisions and bounded tool evidence, not raw test logs", async () => {
+    const data = await fixture(3, true)
+    const { sdk, stats } = mockSdk(data.archiveId, false, 700_000)
+    const prompts: string[] = []
+    const original = sdk.session.prompt
+    sdk.session.prompt = async (request: any) => {
+        prompts.push(request.body.parts[0].text)
+        return original(request)
+    }
+    const logger = new Logger(false)
+    const result = await summarizeArchiveBoundary({
+        ...data,
+        client: sdk,
+        runtime: createRuntimeState(sdk, logger),
+        logger,
+        sessionId,
+        params: {
+            providerId: "openai",
+            modelId: "gpt-6-luna",
+            agent: "specialist",
+            variant: "max",
+        },
+        summaryModel: "openai/gpt-6-luna",
+        summaryEffort: "high",
+    })
+    assert.ok(result.ok)
+    assert.equal(stats().calls, 1, "the fitting evidence needs one synchronous handoff call")
+    assert.match(prompts[0], /Resolved chronological task 0:/)
+    assert.match(prompts[0], /src\/task\.ts/)
+    assert.match(prompts[0], /\[older details in exact archive\]/)
+    assert.doesNotMatch(prompts[0], /FULL_TOOL_OUTPUT_(?:FULL_TOOL_OUTPUT_){199}/)
+    const archive = await readArchiveEntry(data.directory, data.catalog, data.archiveId)
+    assert.ok(archive.includes("FULL_TOOL_OUTPUT_".repeat(200)))
+})
+
+test("live handoff evidence keeps only the latest generated goal continuation", async () => {
     const data = await fixture(80, true, true)
     const { sdk } = mockSdk(data.archiveId)
     const prompts: string[] = []
@@ -534,7 +612,9 @@ test("pruned archive evidence keeps only the latest generated goal continuation"
     })
     const sourcePrompts = prompts.filter(
         (prompt) =>
-            prompt.includes("Pruned archive evidence") || prompt.includes("Chronological chunk"),
+            prompt.includes("Archive evidence:") ||
+            prompt.includes("Pruned archive evidence") ||
+            prompt.includes("Chronological chunk"),
     )
     assert.ok(sourcePrompts.length > 0)
     assert.equal(

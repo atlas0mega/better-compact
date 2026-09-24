@@ -211,13 +211,19 @@ only when the resulting plan exceeds 115% of the target. It may use at most
 six calls (up to five balanced concurrent source chunks plus one final handoff).
 Archive descriptions are separate Luna/default jobs that run in the background;
 the two paths share **at most seven calls per compaction**, including retries.
-Each failed job may be attempted at most five times while slots remain.
-An archive whose evidence fits the detected model window uses one live-handoff
-call; larger work uses balanced chunks. ~23k estimated input tokens is a
-preferred chunk size, not a hard ceiling. A chunk may grow to the summary model's detected
-context limit minus a bounded output reserve (24k tokens on large models) and its
-own prompt overhead. If exact archived payloads are too large, the summarizer
-receives pruned evidence while the private archive retains the exact originals.
+Each failed job may be attempted at most five times while slots remain. Small
+evidence (about 23k estimated input tokens or less) needs only one live-handoff
+call. Larger evidence uses up to five **evenly balanced, concurrent** source
+calls even when the summary model could fit it in one request. Their results
+feed one final grand-summary call; only its validated handoff can replace the
+live prefix. ~23k is a preferred chunk size, not a hard ceiling. A chunk may
+grow to the summary model's detected context limit minus a bounded output
+reserve (24k tokens on large models) and its own prompt overhead. Source
+evidence keeps user wording and assistant decisions but bounds old tool payloads
+and reasoning; the private archive retains the exact originals. Scratch setup
+and cleanup have 30-second request deadlines; each Luna prompt has a three-minute
+request deadline so a stalled source cannot hold the next provider request
+indefinitely.
 No historical chunk is silently dropped. A failed or non-reducing live handoff
 retains the deterministic handoff and private archive for later recall. Once a
 live handoff validates and makes the **complete** outgoing context smaller, it

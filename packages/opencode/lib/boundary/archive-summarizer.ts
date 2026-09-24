@@ -242,6 +242,57 @@ function compactEvidence(message: WithParts, archiveId: string): string {
     })
 }
 
+// The archive is the exact source of truth. A Luna-sized context window is not
+// a reason to paste entire test logs, patches, and tool inputs into a live
+// handoff request: they drown out the decisions we are trying to recover.
+function handoffEvidence(message: WithParts, archiveId: string): string {
+    const parts: Array<Record<string, unknown>> = []
+    for (const part of message.parts) {
+        if (part.type === "text" && !part.ignored) {
+            parts.push({ type: "text", text: part.text })
+        } else if (part.type === "reasoning") {
+            parts.push({ type: "reasoning", text: evidenceExcerpt(part.text, 1_600) })
+        } else if (part.type === "tool") {
+            const state = part.state
+            const output =
+                state?.status === "completed"
+                    ? state.output
+                    : state?.status === "error"
+                      ? state.error
+                      : undefined
+            const detail =
+                typeof output === "string"
+                    ? output
+                    : output === undefined
+                      ? ""
+                      : JSON.stringify(output)
+            parts.push({
+                type: "tool",
+                tool: part.tool,
+                status: state?.status,
+                input: evidenceExcerpt(JSON.stringify(state?.input ?? {}), 256),
+                result: evidenceExcerpt(detail, 640),
+            })
+        } else if (part.type === "patch") {
+            parts.push({ type: "patch", files: part.files })
+        }
+    }
+    return JSON.stringify({
+        archiveId,
+        id: message.info.id,
+        role: message.info.role,
+        agent: message.info.role === "user" ? message.info.agent : undefined,
+        parts,
+        exactHistory: "available by archive recall",
+    })
+}
+
+function evidenceExcerpt(text: string, limit: number): string {
+    if (text.length <= limit) return text
+    const first = Math.ceil(limit * 0.6)
+    return `${text.slice(0, first)}\n[older details in exact archive]\n${text.slice(-(limit - first))}`
+}
+
 /** Evidence for the live handoff excludes parts that remain in the outgoing
  * request. The raw delta on disk remains complete for exact recall. */
 function replacedEvidence(
@@ -331,7 +382,7 @@ export async function summarizeArchiveBoundary(input: {
     const retainedReasoning = new Set(input.plan?.preservedReasoningItemKeys ?? [])
     const retainedAssistantText = new Set(input.plan?.protectedAssistantItemKeys ?? [])
     const retainedNativeTurns = new Set(input.plan?.preservedPrefixTurnKeys ?? [])
-    let priorGoalIndex = -1
+    let priorGoal: { index: number; archiveId: string; id: string } | undefined
     for (const entry of pending) {
         const raw = await readArchiveEntry(input.directory, input.catalog, entry.id)
         let native: WithParts[]
@@ -350,7 +401,7 @@ export async function summarizeArchiveBoundary(input: {
                 retainedNativeTurns,
             )
             if (!replaced) continue
-            const text = JSON.stringify({ archiveId: entry.id, message: replaced })
+            const text = handoffEvidence(replaced, entry.id)
             source.push({ text, tokens: countTokens(text + "\n") })
             const goalContinuation =
                 replaced.info.role === "user" &&
@@ -360,21 +411,24 @@ export async function summarizeArchiveBoundary(input: {
                         openCodeConventions.repeatableUserTextKey?.(part.text) ===
                             "goal-continuation",
                 )
-            if (goalContinuation && priorGoalIndex >= 0) {
-                const prior = condensed[priorGoalIndex]
-                const priorId = JSON.parse(prior.text) as { archiveId: string; id: string }
+            if (goalContinuation && priorGoal) {
                 const superseded = JSON.stringify({
-                    archiveId: priorId.archiveId,
-                    id: priorId.id,
+                    archiveId: priorGoal.archiveId,
+                    id: priorGoal.id,
                     role: "user",
                     note: "Superseded generated goal continuation; latest copy follows.",
                 })
-                condensed[priorGoalIndex] = {
+                source[priorGoal.index] = {
+                    text: superseded,
+                    tokens: countTokens(superseded + "\n"),
+                }
+                condensed[priorGoal.index] = {
                     text: superseded,
                     tokens: countTokens(superseded + "\n"),
                 }
             }
-            if (goalContinuation) priorGoalIndex = condensed.length
+            if (goalContinuation)
+                priorGoal = { index: condensed.length, archiveId: entry.id, id: replaced.info.id }
             const evidence = compactEvidence(replaced, entry.id)
             condensed.push({ text: evidence, tokens: countTokens(evidence + "\n") })
         }
@@ -424,12 +478,17 @@ export async function summarizeArchiveBoundary(input: {
             oversized: lastOutput ?? undefined,
         }
     }
-    const raw = source.map((item) => item.text).join("\n")
-    const directTokens = countTokens(`${instructions}\n${raw}`) + 80
-    // A fitting archive needs one call even when it exceeds the preferred
-    // chunk size; the preference only sizes work that cannot fit at once.
-    if (directTokens <= capacity) {
-        return requestFinal(`${instructions}\n\nArchive evidence:\n${raw}`)
+    const evidence = source.map((item) => item.text).join("\n")
+    const sourceTokens = source.reduce((sum, item) => sum + item.tokens, 0)
+    const directTokens = countTokens(`${instructions}\n${evidence}`) + 80
+    // Small deltas need no intermediate synthesis. Large ones benefit from
+    // balanced concurrent source calls even when Luna could ingest the whole
+    // archive at once; the seventh shared slot is the background description.
+    if (
+        directTokens <= capacity &&
+        (sourceTokens <= PREFERRED_INPUT_TOKENS || source.length === 1)
+    ) {
+        return requestFinal(`${instructions}\n\nArchive evidence:\n${evidence}`)
     }
 
     const fitsSourceBudget = (items: typeof source) =>
@@ -451,8 +510,8 @@ export async function summarizeArchiveBoundary(input: {
             )
         }
     }
-    const sourceTokens = source.reduce((sum, item) => sum + item.tokens, 0)
-    const estimatedGroups = Math.max(2, Math.ceil(sourceTokens / PREFERRED_INPUT_TOKENS))
+    const selectedSourceTokens = source.reduce((sum, item) => sum + item.tokens, 0)
+    const estimatedGroups = Math.max(2, Math.ceil(selectedSourceTokens / PREFERRED_INPUT_TOKENS))
     let chunks: (typeof source)[] = []
     for (
         let groups = Math.min(MAX_SOURCE_CHUNKS, source.length, estimatedGroups);

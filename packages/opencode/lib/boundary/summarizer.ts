@@ -178,6 +178,9 @@ function canRunScratchSession(client: any): boolean {
 }
 
 // Side-model transport: one throwaway OpenCode scratch session per call (one or more jobs).
+const SCRATCH_SETUP_TIMEOUT_MS = 30_000
+const SCRATCH_PROMPT_TIMEOUT_MS = 180_000
+
 function createScratchSummarizer(input: SummarizeBoundaryJobsInput): Summarizer {
     return {
         complete: (job) => runScratchSummary(input, [job], job.prompt),
@@ -260,6 +263,7 @@ async function runScratchSummary(
         const created = await input.client.session.create({
             body,
             ...(input.directory ? { query: { directory: input.directory } } : {}),
+            signal: AbortSignal.timeout(SCRATCH_SETUP_TIMEOUT_MS),
         })
         if (created?.error) throw scratchResponseError("Scratch session creation", created.error)
         scratchSessionId = created?.data?.id ?? created?.id
@@ -269,6 +273,7 @@ async function runScratchSummary(
         const response = await input.client.session.prompt({
             path: { id: scratchSessionId },
             ...(input.directory ? { query: { directory: input.directory } } : {}),
+            signal: AbortSignal.timeout(SCRATCH_PROMPT_TIMEOUT_MS),
             body: {
                 agent: input.params.agent,
                 model:
@@ -300,6 +305,7 @@ async function runScratchSummary(
                 await input.client.session.delete({
                     path: { id: scratchSessionId },
                     ...(input.directory ? { query: { directory: input.directory } } : {}),
+                    signal: AbortSignal.timeout(SCRATCH_SETUP_TIMEOUT_MS),
                 })
             } catch (error) {
                 input.logger.warn("Failed to delete Better Compact scratch session", {

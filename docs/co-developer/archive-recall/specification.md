@@ -2,6 +2,8 @@
 
 **Status:** approved design with subsequent user revisions; implementation in progress. Decision-summary revision 1 was explicitly approved; the discussion record and evidence are in [ledger.md](ledger.md). OpenCode first; maintain existing Pi and Claude Code behavior.
 
+**2026-09-24 call-planning revision:** Keep exact archived originals private. The live Luna/high handoff receives full real-user wording and assistant text plus bounded tool/reasoning evidence, not entire raw tool logs merely because Luna's window can fit them. Small evidence uses one call; larger evidence fans out to up to five approximately equal chronological calls concurrently even if a single Luna request could fit it. Await all source calls, then use one final **validated grand summary** as the only live prefill before the next provider request. The seventh shared slot remains available for a background Luna/default archive description. Scratch HTTP requests have deadlines; never leave an unbounded queue behind a continuing agent loop. This supersedes earlier "one call for every fitting archive" examples below.
+
 **Current user corrections (supersede conflicting older wording below):** OpenCode
 automatic compaction stays enabled; the live target is **25%**, best effort, and
 a new last-resort prefix starts only beyond **115% of target**. The fallback
