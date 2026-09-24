@@ -1,9 +1,10 @@
 import type { BetterCompactCommand, TuiApi } from "./types"
 
-export function registerCommands(api: TuiApi, commands: BetterCompactCommand[]) {
+export function registerCommands(api: TuiApi, commands: BetterCompactCommand[], priority = 0) {
     const keymap = (api as any).keymap
     if (keymap?.registerLayer) {
         keymap.registerLayer({
+            priority,
             commands: commands.map((command) => ({
                 namespace: "palette",
                 name: command.name,

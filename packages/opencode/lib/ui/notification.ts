@@ -17,6 +17,22 @@ export async function sendIgnoredMessage(
               }
             : undefined
 
+    // The v1 session.get response does not contain model or variant. Without
+    // an observed chat-hook variant, a no-reply prompt could reset xhigh to
+    // the model default. Use a non-message notification instead.
+    if (!variant) {
+        try {
+            await client.tui.showToast({
+                body: { title: "Better Compact", message: text, variant: "info", duration: 7000 },
+            })
+        } catch (error) {
+            logger.warn("Could not show Better Compact notification", {
+                error: error instanceof Error ? error.message : String(error),
+            })
+        }
+        return
+    }
+
     try {
         await client.session.prompt({
             path: {

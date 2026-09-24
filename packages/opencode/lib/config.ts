@@ -102,6 +102,7 @@ export const VALID_CONFIG_KEYS = new Set([
     "compaction.custom.triggerPercent",
     "compaction.custom.targetPercent",
     "compaction.custom.recentToolTokens",
+    "compaction.custom.recentReasoningTokens",
     "compaction.custom.summarizerConcurrency",
     "compaction.custom.collapsePercent",
     "compaction.custom.prefixSummary",
@@ -325,6 +326,7 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                         "triggerPercent",
                         "targetPercent",
                         "recentToolTokens",
+                        "recentReasoningTokens",
                         "summarizerConcurrency",
                         "collapsePercent",
                     ] as const) {
@@ -437,18 +439,24 @@ const defaultConfig: PluginConfig = {
     },
 }
 
-const GLOBAL_CONFIG_DIR = process.env.XDG_CONFIG_HOME
-    ? join(process.env.XDG_CONFIG_HOME, "opencode")
-    : join(homedir(), ".config", "opencode")
-const GLOBAL_CONFIG_PATH_JSONC = join(GLOBAL_CONFIG_DIR, "better-compact.jsonc")
-const GLOBAL_CONFIG_PATH_JSON = join(GLOBAL_CONFIG_DIR, "better-compact.json")
+function globalConfigPaths() {
+    const directory = process.env.XDG_CONFIG_HOME
+        ? join(process.env.XDG_CONFIG_HOME, "opencode")
+        : join(homedir(), ".config", "opencode")
+    return {
+        directory,
+        jsonc: join(directory, "better-compact.jsonc"),
+        json: join(directory, "better-compact.json"),
+    }
+}
 const SCHEMA_URL =
     "https://raw.githubusercontent.com/AshishKumar4/better-compact/main/packages/opencode/better-compact.schema.json"
 
 function globalConfigPath(): string {
-    if (existsSync(GLOBAL_CONFIG_PATH_JSONC)) return GLOBAL_CONFIG_PATH_JSONC
-    if (existsSync(GLOBAL_CONFIG_PATH_JSON)) return GLOBAL_CONFIG_PATH_JSON
-    return GLOBAL_CONFIG_PATH_JSONC
+    const paths = globalConfigPaths()
+    if (existsSync(paths.jsonc)) return paths.jsonc
+    if (existsSync(paths.json)) return paths.json
+    return paths.jsonc
 }
 
 export function hasGlobalCompactionConfig(): boolean {
@@ -474,7 +482,8 @@ export function saveGlobalCompactionConfig(
     const path = globalConfigPath()
     const temp = `${path}.${process.pid}.${Date.now()}.tmp`
     try {
-        if (!existsSync(GLOBAL_CONFIG_DIR)) mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true })
+        const directory = globalConfigPaths().directory
+        if (!existsSync(directory)) mkdirSync(directory, { recursive: true })
         const original = existsSync(path)
             ? readFileSync(path, "utf-8")
             : `{
@@ -503,6 +512,10 @@ export function saveGlobalCompactionConfig(
             {
                 path: ["compaction", "custom", "recentToolTokens"],
                 value: normalized.custom.recentToolTokens,
+            },
+            {
+                path: ["compaction", "custom", "recentReasoningTokens"],
+                value: normalized.custom.recentReasoningTokens,
             },
             {
                 path: ["compaction", "custom", "summarizerConcurrency"],
@@ -573,10 +586,11 @@ function getConfigPaths(ctx?: PluginInput): {
     configDir: string | null
     project: string | null
 } {
-    const global = existsSync(GLOBAL_CONFIG_PATH_JSONC)
-        ? GLOBAL_CONFIG_PATH_JSONC
-        : existsSync(GLOBAL_CONFIG_PATH_JSON)
-          ? GLOBAL_CONFIG_PATH_JSON
+    const paths = globalConfigPaths()
+    const global = existsSync(paths.jsonc)
+        ? paths.jsonc
+        : existsSync(paths.json)
+          ? paths.json
           : null
 
     let configDir: string | null = null
@@ -609,15 +623,16 @@ function getConfigPaths(ctx?: PluginInput): {
 }
 
 function createDefaultConfig(): void {
-    if (!existsSync(GLOBAL_CONFIG_DIR)) {
-        mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true })
+    const { directory, jsonc } = globalConfigPaths()
+    if (!existsSync(directory)) {
+        mkdirSync(directory, { recursive: true })
     }
 
     const configContent = `{
   "$schema": "${SCHEMA_URL}"
 }
 `
-    writeFileSync(GLOBAL_CONFIG_PATH_JSONC, configContent, "utf-8")
+    writeFileSync(jsonc, configContent, "utf-8")
 }
 
 interface ConfigLoadResult {

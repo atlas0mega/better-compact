@@ -71,4 +71,8 @@ export async function initializeSessionState(
 
     state.boundary.activePlan = persisted.boundary?.activePlan ?? null
     state.boundary.job = persisted.boundary?.job ?? null
+    state.boundary.automaticCheck = persisted.boundary?.automaticCheck
+    state.boundary.queuedManual = persisted.boundary?.queuedManual
+    state.boundary.lastIdleUsageMessageId = persisted.boundary?.lastIdleUsageMessageId
+    state.boundary.lastPlannedUsageMessageId = persisted.boundary?.lastPlannedUsageMessageId
 }

@@ -40,6 +40,25 @@ export function getCurrentTokenUsage(state: SessionState, messages: WithParts[])
     return 0
 }
 
+/** Identity of the response whose provider usage is currently the trigger input. */
+export function getCurrentUsageMessageId(
+    state: SessionState,
+    messages: WithParts[],
+): string | undefined {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const info = messages[i].info
+        if (info.role !== "assistant" || (info.tokens?.output ?? 0) <= 0) continue
+        if (
+            state.lastCompaction > 0 &&
+            (info.time.created < state.lastCompaction ||
+                (info.summary === true && info.time.created === state.lastCompaction))
+        )
+            return undefined
+        return info.id
+    }
+    return undefined
+}
+
 export function getCurrentParams(
     state: SessionState,
     messages: WithParts[],

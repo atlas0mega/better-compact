@@ -440,6 +440,31 @@ test("reference index replays byte-stably", () => {
     assert.equal(JSON.stringify(replayed), JSON.stringify(transformed))
 })
 
+test("catalog-backed handoff omits per-turn transcript paths and replays stably", () => {
+    const turns = buildReferenceIndexConversation()
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 1_000_000,
+            force: true,
+            recentToolResultBudgetTokens: 0,
+            archiveCatalogText: "- c000001-123456789abc — Earlier parser work",
+        }),
+        spec,
+    )
+    assert.ok(plan)
+    const applied = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
+    const live = applied.map((turn) => syntheticTextOf(turn)).join("\n")
+    assert.match(live, /Earlier parser work/)
+    assert.match(live, /better_compact_recall/)
+    assert.doesNotMatch(live, /Raw transcript:|## Reference Files/)
+    assert.doesNotMatch(live, /\.opencode\/better-compact\/sessions\//)
+    assert.deepEqual(
+        replayPlanSnapshot(turns, toPlanSnapshot(plan), spec, { allowRegrown: true }),
+        applied,
+    )
+})
+
 test("applied output matches the simulated plan when assistant runs are summarized", () => {
     const turns = buildMultiRunConversation()
     const options = inputs({ contextLimit: 40_000, recentToolResultBudgetTokens: 0 })
@@ -518,6 +543,7 @@ test("separate grouped calls rebuild and replay summaries in original turn order
         targetRatio: 0.01,
         force: true,
         recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: false,
     })
     const initial = buildPlan(turns, options, spec)
     assert.ok(initial)
@@ -615,6 +641,292 @@ test("prefix summary fires when pruning cannot get the applied output below trig
         /## Decisions[\s\S]*## Files & Symbols[\s\S]*## Errors \(verbatim\)[\s\S]*## What failed and why[\s\S]*## Constraints[\s\S]*## Next step/,
     )
     assert.equal(transformed.at(-1)?.key, "msg-user-4")
+})
+
+test("an already-triggered pass chases the target even after cheap pruning falls below the trigger", () => {
+    const turns = buildMultiRunConversation()
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 40_000,
+            force: true,
+            triggerTokens: 35_000,
+            targetTokens: 100,
+            recentToolResultBudgetTokens: 0,
+        }),
+        spec,
+    )
+    assert.ok(plan)
+    const prefix = plan.stages.find((stage) => stage.name === "prefix-summary")
+    assert.ok(prefix, "the target, not the trigger, must gate last-resort synthesis")
+    assert.ok(prefix.beforeTokens < plan.triggerTokens)
+    assert.ok(prefix.beforeTokens > plan.targetTokens)
+})
+
+test("best-effort target does not launch a new last resort within fifteen percent", () => {
+    const turns = buildMultiRunConversation()
+    const simpleSpec = { ...spec, stages: [toolsOldStage, reasoningStage] }
+    const base = inputs({
+        contextLimit: 40_000,
+        force: true,
+        minTailUserTurns: 1,
+        recentToolResultBudgetTokens: 0,
+        targetTokens: 100,
+        prefixSummaryAllowed: false,
+    })
+    const cheap = buildPlan(turns, base, simpleSpec)
+    assert.ok(cheap)
+    const withinTarget = Math.ceil(cheap.afterPruneTokens / 1.1)
+    const within = buildPlan(
+        turns,
+        { ...base, targetTokens: withinTarget, prefixSummaryAllowed: true },
+        simpleSpec,
+    )
+    assert.ok(within)
+    assert.ok(within.afterPruneTokens > within.targetTokens)
+    assert.ok(within.afterPruneTokens <= Math.floor(within.targetTokens * 1.15))
+    assert.equal(within.requiresCustomCompaction, false)
+    assert.equal(within.stages.some((stage) => stage.name === "prefix-summary"), false)
+
+    const outside = buildPlan(
+        turns,
+        { ...base, targetTokens: Math.floor(cheap.afterPruneTokens / 1.2), prefixSummaryAllowed: true },
+        simpleSpec,
+    )
+    assert.ok(outside?.requiresCustomCompaction)
+})
+
+test("OpenCode last resort fills available context with newest native prefix turns", () => {
+    const turns = [
+        turn("first-user", "user", [textItem("first-user", "Keep the original request")], 1),
+        ...Array.from({ length: 12 }, (_, index) =>
+            turn(
+                `progress-${index}`,
+                "assistant",
+                [textItem(`progress-${index}`, `Step ${index}: ${"specific evidence ".repeat(160)}`)],
+                index + 2,
+            ),
+        ),
+        turn("latest-user", "user", [textItem("latest-user", "Continue the task")], 20),
+        turn("latest-assistant", "assistant", [textItem("latest-assistant", "Current work")], 21),
+    ]
+    const config = inputs({
+        contextLimit: 50_000,
+        force: true,
+        targetTokens: 3_000,
+        collapsePercent: 10,
+        minTailUserTurns: 1,
+        recentToolResultBudgetTokens: 0,
+        preservePrefixBudgets: true,
+    })
+    const plan = buildPlan(turns, config, spec)
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.ok(plan.preservedPrefixTurnKeys?.length)
+    const applied = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
+    const barePlan = buildPlan(turns, { ...config, preservePrefixBudgets: false }, spec)
+    assert.ok(barePlan)
+    assert.ok(plan.afterPruneTokens > barePlan.afterPruneTokens + 500)
+    assert.ok(plan.afterPruneTokens <= plan.targetTokens)
+    assert.equal(applied[0].role, "user")
+    assert.equal(plan.afterPruneTokens, codec.estimateTurns(applied))
+    assert.deepEqual(
+        replayPlanSnapshot(turns, toPlanSnapshot(plan), spec, { allowRegrown: true }),
+        applied,
+    )
+    assert.equal(applied.at(-1)?.key, "latest-assistant")
+
+    const continued = [
+        ...turns,
+        turn("next-user", "user", [textItem("next-user", "Another correction")], 22),
+        turn("next-assistant", "assistant", [textItem("next-assistant", "Continue work")], 23),
+    ]
+    const next = buildPlan(continued, { ...config, priorPlan: toPlanSnapshot(plan) }, spec)
+    assert.ok(next?.requiresCustomCompaction)
+    for (const key of plan.preservedPrefixTurnKeys ?? []) {
+        assert.ok(next.preservedPrefixTurnKeys?.includes(key), `previously live ${key} disappeared`)
+    }
+    assert.deepEqual(
+        replayPlanSnapshot(continued, toPlanSnapshot(next), spec, { allowRegrown: true }),
+        transformTurns(continued, next.rawTailStartIndex, next, spec),
+    )
+})
+
+test("a validated round-two retirement can replace old native turns without dropping the latest five outputs", () => {
+    const turns = [turn("first-user", "user", [textItem("first-user", "Keep violet widgets")], 1)]
+    for (let index = 0; index < 12; index++)
+        turns.push(
+            turn(
+                `old-output-${index}`,
+                "assistant",
+                [textItem(`old-output-${index}`, `Earlier result ${index}: ${"source evidence ".repeat(170)}`)],
+                index + 2,
+            ),
+        )
+    turns.push(turn("user-current", "user", [textItem("user-current", "Apply violet rule")], 20))
+    const config = inputs({
+        contextLimit: 50_000,
+        targetTokens: 3_000,
+        minTailUserTurns: 1,
+        recentToolResultBudgetTokens: 0,
+        collapsePercent: 10,
+        preservePrefixBudgets: true,
+        force: true,
+    })
+    const first = buildPlan(turns, config, spec)
+    assert.ok(first?.requiresCustomCompaction)
+    assert.ok(first.preservedPrefixTurnKeys?.length)
+    const continued = [
+        ...turns,
+        ...Array.from({ length: 8 }, (_, index) =>
+            turn(
+                `new-output-${index}`,
+                "assistant",
+                [textItem(`new-output-${index}`, `New answer ${index}: ${"current evidence ".repeat(170)}`)],
+                index + 21,
+            ),
+        ),
+        turn("new-user", "user", [textItem("new-user", "Keep the latest violet correction")], 30),
+    ]
+    const handoff = "## Decisions\n- Violet widgets remain required.\n## Next step\n- Continue the current correction."
+    const nextConfig = { ...config, recentAssistantOutputs: 5 }
+    const stillCarrying = buildPlan(
+        continued,
+        { ...nextConfig, priorPlan: toPlanSnapshot(first), prefixSummary: handoff },
+        spec,
+    )
+    const retired = buildPlan(
+        continued,
+        { ...nextConfig, priorPlan: toPlanSnapshot(first), prefixSummary: handoff, retirementThrough: 1 },
+        spec,
+    )
+    assert.ok(stillCarrying?.requiresCustomCompaction)
+    assert.ok(retired?.requiresCustomCompaction)
+    assert.ok(
+        retired.afterPruneTokens < stillCarrying.afterPruneTokens,
+        "the accepted handoff should replace associated old native turns, not coexist with them",
+    )
+    for (const key of first.preservedPrefixTurnKeys ?? []) {
+        assert.ok(!retired.preservedPrefixTurnKeys?.includes(key), `retired ${key} is still native`)
+        assert.ok(retired.transcript.turns?.some((turn) => turn.key === key), `missing exact ${key} from archive source`)
+    }
+    assert.equal(retired.retirementThrough, 1)
+    const applied = transformTurns(continued, retired.rawTailStartIndex, retired, spec)
+    for (let index = 3; index < 8; index++) {
+        const output = applied.find((turn) => turn.key === `new-output-${index}`)?.items[0]
+        assert.ok(output?.kind === "text", `current assistant output ${index} was lost`)
+        assert.equal(
+            output.text,
+            `New answer ${index}: ${"current evidence ".repeat(170)}`,
+            `current assistant output ${index} did not survive byte-exact`,
+        )
+    }
+    assert.deepEqual(
+        replayPlanSnapshot(continued, toPlanSnapshot(retired), spec, { allowRegrown: true }),
+        applied,
+    )
+})
+
+test("five latest real assistant outputs keep their entire reasoning span without tool calls", () => {
+    const turns = [turn("start", "user", [textItem("start", "Investigate")], 1)]
+    for (let index = 0; index < 7; index++) {
+        turns.push(
+            turn(
+                `output-${index}`,
+                "assistant",
+                [
+                    reasoningItem(`output-${index}`, `Reasoning ${index} ${"step ".repeat(500)}`),
+                    textItem(`output-${index}`, `Actual answer ${index}`),
+                    toolItem(`output-${index}`, "read", `Raw tool data ${index}`),
+                ],
+                index * 2 + 2,
+            ),
+            turn(
+                `tool-only-${index}`,
+                "assistant",
+                [toolItem(`tool-only-${index}`, "read", `More tool data ${index}`)],
+                index * 2 + 3,
+            ),
+        )
+    }
+    turns.push(turn("latest", "user", [textItem("latest", "Continue")], 30))
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 50_000,
+            force: true,
+            minTailUserTurns: 1,
+            targetTokens: 2_000,
+            recentToolResultBudgetTokens: 0,
+            recentReasoningBudgetTokens: 100,
+            recentAssistantOutputs: 5,
+            preservePrefixBudgets: true,
+        }),
+        spec,
+    )
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.equal(plan.anchorReasoningLimited, undefined)
+    assert.deepEqual(
+        plan.protectedAssistantItemKeys,
+        [2, 3, 4, 5, 6].map((index) => `output-${index}-part`),
+    )
+    assert.deepEqual(
+        new Set(plan.preservedReasoningItemKeys),
+        new Set([2, 3, 4, 5, 6].map((index) => `output-${index}-reasoning`)),
+    )
+    const applied = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
+    for (let index = 2; index < 7; index++) {
+        const native = applied.find((item) => item.key === `output-${index}`)
+        assert.ok(native)
+        assert.ok(native.items.some((item) => item.kind === "text"))
+        assert.ok(native.items.some((item) => item.kind === "reasoning"))
+        assert.ok(native.items.every((item) => item.kind !== "tool"))
+    }
+    assert.equal(applied.at(-1)?.key, "latest")
+    assert.deepEqual(
+        replayPlanSnapshot(turns, toPlanSnapshot(plan), spec, { allowRegrown: true }),
+        applied,
+    )
+})
+
+test("an oversized five-output reasoning span keeps answers and bounds thoughts with a buffer", () => {
+    const turns = [turn("start", "user", [textItem("start", "Investigate")], 1)]
+    for (let index = 0; index < 5; index++) {
+        turns.push(
+            turn(
+                `answer-${index}`,
+                "assistant",
+                [
+                    reasoningItem(`answer-${index}`, `Reasoning ${index} ${"step ".repeat(3_000)}`),
+                    textItem(`answer-${index}`, `Output ${index}`),
+                ],
+                index + 2,
+            ),
+        )
+    }
+    turns.push(turn("latest", "user", [textItem("latest", "Continue")], 8))
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 12_000,
+            force: true,
+            minTailUserTurns: 1,
+            targetTokens: 2_000,
+            recentToolResultBudgetTokens: 0,
+            recentReasoningBudgetTokens: 500,
+            recentAssistantOutputs: 5,
+            preservePrefixBudgets: true,
+        }),
+        spec,
+    )
+    assert.ok(plan)
+    assert.equal(plan.anchorReasoningLimited, true)
+    assert.equal(plan.protectedAssistantItemKeys?.length, 5)
+    assert.equal(plan.preservedReasoningItemKeys?.length, 0)
+    const applied = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
+    assert.ok(codec.estimateTurns(applied) < plan.contextLimit)
+    for (let index = 0; index < 5; index++) {
+        assert.ok(applied.find((item) => item.key === `answer-${index}`)?.items.some((item) => item.kind === "text"))
+    }
 })
 
 test("projection does not scale transformed context by raw provider ratio", () => {
@@ -716,6 +1028,31 @@ test("provider-reported totals keep plan accounting on a single scale", () => {
 
     const transformed = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
     assert.equal(plan.afterPruneTokens, codec.estimateTurns(transformed) + plan.overheadTokens)
+})
+
+test("fresh tool content cannot erase overhead measured against the previous provider history", () => {
+    const turns = buildMultiRunConversation()
+    const rawCurrent = codec.estimateTurns(turns)
+    const previousProviderTotal = rawCurrent + 1_000
+    const priorHistoryWithOutput = Math.floor(rawCurrent / 2)
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 120_000,
+            force: true,
+            recentToolResultBudgetTokens: 0,
+            providerReportedTokens: previousProviderTotal,
+            providerHistoryTokens: priorHistoryWithOutput,
+        }),
+        spec,
+    )
+    assert.ok(plan)
+    assert.equal(plan.overheadTokens, previousProviderTotal - priorHistoryWithOutput)
+    assert.equal(
+        plan.afterPruneTokens,
+        codec.estimateTurns(transformTurns(turns, plan.rawTailStartIndex, plan, spec)) +
+            plan.overheadTokens,
+    )
 })
 
 test("planner marks custom compaction as last resort only after pruning is still too large", () => {
@@ -1054,6 +1391,29 @@ test("planner preserves recent tool results under the tool-tail budget", () => {
     }
 })
 
+test("a single old tool result cannot consume more than the full live target", () => {
+    const turns = buildLargeConversation()
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 10_000,
+            force: true,
+            minTailUserTurns: 1,
+            recentToolResultBudgetTokens: 40_000,
+            targetTokens: 3_500,
+            preservePrefixBudgets: true,
+        }),
+        spec,
+    )
+    assert.ok(plan)
+    const oversizedCall = turns
+        .flatMap((item) => item.items)
+        .find((item) => item.kind === "tool" && codec.estimateItem(item) > plan.targetTokens)
+    assert.ok(oversizedCall?.kind === "tool")
+    assert.ok(!plan.preservedToolCallIds.includes(oversizedCall.callId))
+    assert.ok(plan.afterPruneTokens < plan.contextLimit)
+})
+
 test("planner preserves only the latest compacted todo state", () => {
     const turns = [
         turn("msg-user-1", "user", [textItem("msg-user-1", "old turn")], 1),
@@ -1282,9 +1642,16 @@ test("purging stale failures preserves the newest failed tool inside the recent 
         turn("msg-assistant-3", "assistant", [textItem("msg-assistant-3", "middle assistant")], 6),
         turn("msg-user-4", "user", [textItem("msg-user-4", "latest user")], 7),
     ]
+    const newest = turns[3].items[0]
+    assert.equal(newest.kind, "tool")
     const plan = buildPlan(
         turns,
-        inputs({ contextLimit: 1_000_000, force: true, recentToolResultBudgetTokens: 1 }),
+        inputs({
+            contextLimit: 1_000_000,
+            force: true,
+            recentToolResultBudgetTokens:
+                newest.kind === "tool" ? codec.estimateItem(newest) : 0,
+        }),
         spec,
     )
     assert.ok(plan)
@@ -1324,6 +1691,46 @@ test("engine prunes on provider-reported usage the raw estimate alone misses", a
         providerReportedTokens: Math.floor(contextLimit * 0.9),
     })
     assert.equal(withUsage.outcome, "planned")
+})
+
+test("engine declines a complete-context expansion when the target is irreducible", async () => {
+    const turns = [
+        turn("old-user", "user", [textItem("old-user", "Synthetic violet decision")], 1),
+        turn("old-assistant", "assistant", [textItem("old-assistant", "Done")], 2),
+        turn("middle-user", "user", [textItem("middle-user", "Keep violet")], 3),
+        turn("middle-assistant", "assistant", [textItem("middle-assistant", "Acknowledged")], 4),
+        turn("new-user", "user", [textItem("new-user", "Continue the task")], 5),
+    ]
+    const options = inputs({
+        contextLimit: 5_000,
+        force: true,
+        triggerTokens: 10,
+        targetTokens: 50,
+        prefixSummaryAllowed: false,
+        recentAssistantOutputs: 5,
+        preservePrefixBudgets: true,
+        summariesAllowed: false,
+    })
+    const candidate = buildPlan(turns, options, spec)
+    assert.ok(candidate)
+    assert.ok(candidate.afterPruneTokens >= codec.estimateTurns(turns) + candidate.overheadTokens)
+    let saved = false
+    let wrote = false
+    const engine = createEngine(spec, {
+        transcripts: {
+            citablePath: (key, hash) => `transcripts/${key}/${hash}.md`,
+            write: async () => {
+                wrote = true
+                return {}
+            },
+        },
+        plans: { load: () => null, save: () => { saved = true } },
+        logger: { info() {}, debug() {}, warn() {}, error() {} },
+    })
+    const result = await engine.process({ ...options, sessionKey, turns })
+    assert.equal(result.outcome, "unchanged")
+    assert.equal(saved, false)
+    assert.equal(wrote, false)
 })
 
 test("engine does not replay thresholds cached for another model", async () => {
@@ -1404,6 +1811,21 @@ test("engine rebuilds a cached plan when prefix-summary or collapse settings cha
         "planned",
     )
     assert.equal(snapshot.prefixSummaryAllowed, false)
+    const withArchive = {
+        ...request,
+        collapsePercent: 75,
+        prefixSummaryAllowed: false,
+        archiveGeneration: 1,
+        retirementThrough: 1,
+    }
+    assert.equal((await engine.process(withArchive)).outcome, "planned")
+    assert.equal(snapshot.archiveGeneration, 1)
+    assert.equal(snapshot.retirementThrough, 1)
+    assert.equal((await engine.process(withArchive)).outcome, "replayed")
+    assert.equal(
+        (await engine.process({ ...withArchive, archiveGeneration: 2 })).outcome,
+        "planned",
+    )
 })
 
 test("engine keeps the deterministic plan when summary scheduling rejects", async () => {
@@ -1413,6 +1835,7 @@ test("engine keeps the deterministic plan when summary scheduling rejects", asyn
     assert.ok(expectedPlan)
     assert.ok(expectedPlan.summaryJobs.length > 0)
     const warnings: string[] = []
+    const warningDetails: unknown[] = []
     let saved: PlanSnapshot | null = null
     const engine = createEngine(spec, {
         transcripts: {
@@ -1428,8 +1851,9 @@ test("engine keeps the deterministic plan when summary scheduling rejects", asyn
         logger: {
             info() {},
             debug() {},
-            warn(message) {
+            warn(message, data) {
                 warnings.push(message)
+                warningDetails.push(data)
             },
             error() {},
         },
@@ -1441,7 +1865,7 @@ test("engine keeps the deterministic plan when summary scheduling rejects", asyn
         contextLimit: 40_000,
         recentToolResultBudgetTokens: 0,
         summarize: async () => {
-            throw new Error("scheduler failed")
+            throw new Error("scheduler failed with PRIVATE_USER_TEXT")
         },
     })
 
@@ -1453,6 +1877,8 @@ test("engine keeps the deterministic plan when summary scheduling rejects", asyn
     )
     assert.ok(saved)
     assert.ok(warnings.includes("Summary scheduling failed; using deterministic fallback"))
+    assert.ok(JSON.stringify(warningDetails).includes("summary_failure"))
+    assert.doesNotMatch(JSON.stringify(warningDetails), /PRIVATE_USER_TEXT/)
 })
 
 test("verbose keyed turn summaries cannot enlarge a saved plan", async () => {
@@ -1622,6 +2048,62 @@ test("a bounded prefix synthesis replaces the fallback once and replays identica
     assert.equal(replay.outcome, "replayed")
     if (replay.outcome === "replayed") assert.deepEqual(replay.turns, first.turns)
     assert.equal(calls, 1)
+})
+
+test("a consolidated prefix absorbs old per-turn summaries instead of caching them again", () => {
+    const turns = buildMultiRunConversation()
+    const common = { force: true, recentToolResultBudgetTokens: 0, prefixSummaryAllowed: true }
+    const selected = buildPlan(turns, inputs({ ...common, contextLimit: 9_000 }), spec)
+    assert.ok(selected?.summaryJobs.length)
+    const key = selected.summaryJobs[0].key
+    const summary = "Completed the distinctive earlier task state in src/earlier.ts."
+    const prefixOptions = { ...common, contextLimit: 40_000, triggerTokens: 1, targetTokens: 1 }
+    const first = buildPlan(
+        turns,
+        inputs({ ...prefixOptions, assistantSummaries: { [key]: summary } }),
+        spec,
+    )
+    assert.ok(first?.requiresCustomCompaction)
+    assert.match(first.prefixSummary ?? "", /distinctive earlier task state/)
+    assert.deepEqual(first.assistantSummaryKeys, [])
+    assert.deepEqual(first.assistantSummaries, {})
+    const snapshot = toPlanSnapshot(first)
+    assert.deepEqual(snapshot.assistantSummaryKeys, [])
+    assert.deepEqual(snapshot.assistantSummaries, {})
+
+    // An old persisted snapshot may still contain hundreds of absorbed
+    // summaries. They are ignored during the next rebuild, not concatenated
+    // into the intermediate context a second time.
+    const legacy = {
+        ...snapshot,
+        assistantSummaryKeys: [key],
+        assistantSummaries: { [key]: summary.repeat(100) },
+    }
+    const clean = buildPlan(turns, inputs({ ...prefixOptions, priorPlan: snapshot }), spec)
+    const migrated = buildPlan(turns, inputs({ ...prefixOptions, priorPlan: legacy }), spec)
+    assert.ok(clean?.requiresCustomCompaction && migrated?.requiresCustomCompaction)
+    assert.equal(migrated.prefixSummary, clean.prefixSummary)
+    assert.equal(migrated.afterPruneTokens, clean.afterPruneTokens)
+    assert.deepEqual(migrated.assistantSummaryKeys, [])
+    assert.deepEqual(migrated.assistantSummaries, {})
+    const replay = replayPlanSnapshot(turns, toPlanSnapshot(migrated), spec, {
+        allowRegrown: true,
+    })
+    assert.deepEqual(replay, transformTurns(turns, migrated.rawTailStartIndex, migrated, spec))
+
+    const grown = [
+        ...turns,
+        turn("msg-assistant-new", "assistant", [textItem("msg-assistant-new", "New work")], 8),
+        turn("msg-user-new", "user", [textItem("msg-user-new", "Continue the task")], 9),
+    ]
+    const extended = buildPlan(
+        grown,
+        inputs({ ...prefixOptions, priorPlan: toPlanSnapshot(migrated) }),
+        spec,
+    )
+    assert.ok(extended?.requiresCustomCompaction)
+    assert.match(extended.prefixSummary ?? "", /distinctive earlier task state/)
+    assert.deepEqual(extended.assistantSummaries, {})
 })
 
 test("planner triggers when either the provider total or the raw estimate crosses the trigger", () => {
@@ -2326,6 +2808,288 @@ test("summary prompts carry a run's reasoning even though the reasoning stage st
     assert.ok(transformed.every((item) => item.items.every((part) => part.kind !== "reasoning")))
 })
 
+test("recent whole reasoning parts scale with history and replay without resurrecting old parts", () => {
+    const reasoning = "Working through a still-relevant implementation detail. ".repeat(20)
+    const itemCost = countTokens(codec.transcriptLine(reasoningItem("sample", reasoning)))
+    const conversation = (count: number): Turn[] => {
+        const turns: Turn[] = []
+        for (let index = 0; index < count + 2; index++) {
+            turns.push(
+                turn(
+                    `user-${index}`,
+                    "user",
+                    [textItem(`user-${index}`, `instruction ${index}`)],
+                    index * 2 + 1,
+                ),
+            )
+            turns.push(
+                turn(
+                    `assistant-${index}`,
+                    "assistant",
+                    [
+                        reasoningItem(`assistant-${index}`, reasoning),
+                        textItem(`assistant-${index}`, `result ${index}`),
+                    ],
+                    index * 2 + 2,
+                ),
+            )
+        }
+        return turns
+    }
+    const reasoningOnly: LadderSpec = { ...spec, stages: [{ ...reasoningStage, always: true }] }
+    const make = (count: number, priorPlan?: PlanSnapshot, base = Math.floor(itemCost / 2)) => {
+        const turns = conversation(count)
+        const plan = buildPlan(
+            turns,
+            inputs({
+                contextLimit: 100_000,
+                triggerTokens: 1,
+                targetTokens: 20_000,
+                force: true,
+                prefixSummaryAllowed: false,
+                recentReasoningBudgetTokens: base,
+                priorPlan,
+            }),
+            reasoningOnly,
+        )
+        assert.ok(plan)
+        return { plan, turns }
+    }
+    const small = make(4)
+    const large = make(8)
+    assert.equal(small.plan.preservedReasoningItemKeys?.length, 1)
+    assert.equal(large.plan.preservedReasoningItemKeys?.length, 2)
+    const applied = transformTurns(
+        large.turns,
+        large.plan.rawTailStartIndex,
+        large.plan,
+        reasoningOnly,
+    )
+    const replayed = replayPlanSnapshot(large.turns, toPlanSnapshot(large.plan), reasoningOnly, {
+        allowRegrown: true,
+    })
+    assert.deepEqual(replayed, applied)
+    const stripped = make(4, undefined, 0)
+    const grown = make(4, toPlanSnapshot(stripped.plan), itemCost * 4)
+    assert.equal(
+        grown.plan.preservedReasoningItemKeys?.length,
+        0,
+        "already-pruned reasoning cannot reappear",
+    )
+    const tinyWindow = buildPlan(
+        conversation(4),
+        inputs({
+            contextLimit: 1_000,
+            triggerTokens: 1,
+            targetTokens: 1,
+            force: true,
+            prefixSummaryAllowed: false,
+            recentReasoningBudgetTokens: 20_000,
+        }),
+        reasoningOnly,
+    )
+    assert.ok(tinyWindow)
+    assert.equal(
+        tinyWindow.preservedReasoningItemKeys?.length,
+        tinyWindow.transcript.turns
+            ?.flatMap((turn) => turn.items)
+            .filter((item) => item.kind === "reasoning").length,
+        "model context does not reduce the base allowance",
+    )
+    const noHeadroom = buildPlan(
+        conversation(8),
+        inputs({
+            contextLimit: 100_000,
+            triggerTokens: 1,
+            targetTokens: 1,
+            force: true,
+            prefixSummaryAllowed: false,
+            recentReasoningBudgetTokens: Math.floor(itemCost / 2),
+        }),
+        reasoningOnly,
+    )
+    assert.ok(noHeadroom)
+    assert.equal(noHeadroom.preservedReasoningItemKeys?.length, 0, "growth needs target headroom")
+})
+
+test("last-resort prefix emits the selected recent reasoning parts and replays them exactly", () => {
+    const reasoning = "A significant implementation decision with supporting detail. ".repeat(25)
+    const itemCost = countTokens(codec.transcriptLine(reasoningItem("sample", reasoning)))
+    const turns: Turn[] = []
+    for (let index = 0; index < 7; index++) {
+        turns.push(
+            turn(
+                `reason-user-${index}`,
+                "user",
+                [textItem(`reason-user-${index}`, `Request ${index}`)],
+                index * 2 + 1,
+            ),
+        )
+        turns.push(
+            turn(
+                `reason-assistant-${index}`,
+                "assistant",
+                [
+                    reasoningItem(`reason-assistant-${index}`, `${reasoning} ${index}`),
+                    textItem(`reason-assistant-${index}`, `Decision ${index}`),
+                ],
+                index * 2 + 2,
+            ),
+        )
+    }
+    const reasoningFirst: LadderSpec = { ...spec, stages: [{ ...reasoningStage, always: true }] }
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 100_000,
+            triggerTokens: 1,
+            targetTokens: 300,
+            force: true,
+            recentReasoningBudgetTokens: itemCost * 2 + 20,
+            prefixSummaryAllowed: true,
+            preservePrefixBudgets: true,
+            prefixSummary:
+                "## Decisions\n- Preserve current state.\n## Next step\n- Continue work.",
+        }),
+        reasoningFirst,
+    )
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.equal(plan.reasoningSurvivesPrefix, true)
+    const selected = new Set(plan.preservedReasoningItemKeys)
+    assert.ok(selected.size >= 1)
+    const applied = transformTurns(turns, plan.rawTailStartIndex, plan, reasoningFirst)
+    const emitted = applied
+        .flatMap((entry) => entry.items)
+        .filter((item) => item.kind === "reasoning" && selected.has(item.key))
+    assert.equal(
+        emitted.length,
+        selected.size,
+        "every selected older reasoning part survives the final handoff",
+    )
+    assert.equal(plan.afterPruneTokens, codec.estimateTurns(applied) + plan.overheadTokens)
+    const snapshot = toPlanSnapshot(plan)
+    assert.deepEqual(
+        replayPlanSnapshot(turns, snapshot, reasoningFirst, { allowRegrown: true }),
+        applied,
+    )
+
+    const legacy = { ...snapshot, reasoningSurvivesPrefix: undefined }
+    const oldReplay = replayPlanSnapshot(turns, legacy, reasoningFirst, { allowRegrown: true })
+    assert.ok(oldReplay)
+    assert.ok(oldReplay.flatMap((entry) => entry.items).every((item) => !selected.has(item.key)))
+})
+
+test("OpenCode prefix retains selected native tool results without changing other hosts", () => {
+    const turns: Turn[] = []
+    for (let index = 0; index < 6; index++) {
+        turns.push(
+            turn(
+                `tool-user-${index}`,
+                "user",
+                [textItem(`tool-user-${index}`, `Request ${index}`)],
+                index * 2 + 1,
+            ),
+        )
+        turns.push(
+            turn(
+                `tool-assistant-${index}`,
+                "assistant",
+                [
+                    toolItem(
+                        `tool-assistant-${index}`,
+                        "read",
+                        `Specific tool output ${index} ` + "result ".repeat(80),
+                        { filePath: `src/file-${index}.ts` },
+                    ),
+                ],
+                index * 2 + 2,
+            ),
+        )
+    }
+    const options = inputs({
+        contextLimit: 100_000,
+        triggerTokens: 1,
+        targetTokens: 650,
+        force: true,
+        recentToolResultBudgetTokens: 650,
+        prefixSummaryAllowed: true,
+        prefixSummary: "## Decisions\n- Keep current work.\n## Next step\n- Continue.",
+    })
+    const plan = buildPlan(turns, { ...options, preservePrefixBudgets: true }, spec)
+    assert.ok(plan?.requiresCustomCompaction)
+    const selected = new Set(plan.preservedToolCallIds)
+    assert.ok(selected.size > 0)
+    assert.equal(plan.toolSurvivesPrefix, true)
+    const output = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
+    const retained = output
+        .flatMap((entry) => entry.items)
+        .filter((item) => item.kind === "tool" && selected.has(item.callId))
+    assert.equal(
+        retained.length,
+        selected.size,
+        JSON.stringify({
+            selected: [...selected],
+            stages: plan.stages.map((stage) => [stage.name, stage.status]),
+            emitted: output
+                .flatMap((entry) => entry.items)
+                .filter((item) => item.kind === "tool")
+                .map((item) => item.callId),
+        }),
+    )
+    assert.equal(plan.afterPruneTokens, codec.estimateTurns(output) + plan.overheadTokens)
+    assert.deepEqual(
+        replayPlanSnapshot(turns, toPlanSnapshot(plan), spec, { allowRegrown: true }),
+        output,
+    )
+    const otherHost = buildPlan(turns, options, spec)
+    assert.ok(otherHost?.requiresCustomCompaction)
+    assert.equal(otherHost.toolSurvivesPrefix, false)
+    assert.ok(
+        transformTurns(turns, otherHost.rawTailStartIndex, otherHost, spec)
+            .flatMap((entry) => entry.items)
+            .every((item) => item.kind !== "tool" || !selected.has(item.callId)),
+    )
+})
+
+test("production reasoning stage does not prune or regrow when a forced plan already meets target", () => {
+    const turns = [
+        turn("u-old", "user", [textItem("u-old", "Start task")], 1),
+        turn(
+            "a-old",
+            "assistant",
+            [reasoningItem("a-old", "Useful old reasoning"), textItem("a-old", "Decision")],
+            2,
+        ),
+        turn("u-middle", "user", [textItem("u-middle", "Check task")], 3),
+        turn("a-middle", "assistant", [textItem("a-middle", "Still working")], 4),
+        turn("u-new", "user", [textItem("u-new", "Continue task")], 5),
+        turn("a-new", "assistant", [reasoningItem("a-new", "Current reasoning")], 6),
+    ]
+    const productionStage: LadderSpec = { ...spec, stages: [reasoningStage] }
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 100_000,
+            targetTokens: 50_000,
+            triggerTokens: 1,
+            force: true,
+            recentReasoningBudgetTokens: 20_000,
+        }),
+        productionStage,
+    )
+    assert.ok(plan)
+    const transformed = transformTurns(turns, plan.rawTailStartIndex, plan, productionStage)
+    assert.ok(
+        transformed
+            .find((entry) => entry.key === "a-old")
+            ?.items.some((item) => item.kind === "reasoning"),
+    )
+    assert.deepEqual(
+        replayPlanSnapshot(turns, toPlanSnapshot(plan), productionStage, { allowRegrown: true }),
+        transformed,
+    )
+})
+
 test("a tail token budget caps the raw tail even when the last user turns span far more", () => {
     // One long tool loop after a user turn: the count-based tail keeps the
     // whole loop raw and leaves nothing to compact. With a budget the ceiling
@@ -2445,7 +3209,12 @@ test("a collapse cap stops one pass early and leaves the rest above target", () 
             ),
         )
     }
-    const options = { contextLimit: 30_000, force: true, targetRatio: 0.05 }
+    const options = {
+        contextLimit: 30_000,
+        force: true,
+        targetRatio: 0.05,
+        prefixSummaryAllowed: false,
+    }
 
     const uncapped = buildPlan(turns, inputs(options), spec)
     const capped = buildPlan(turns, inputs({ ...options, collapsePercent: 20 }), spec)

@@ -23,6 +23,6 @@ export function createTranscriptStore(directory: string): TranscriptStore {
     }
 }
 
-function safePathPart(value: string): string {
+export function safePathPart(value: string): string {
     return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "unknown"
 }

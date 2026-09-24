@@ -394,8 +394,8 @@ const scenarios: Scenario[] = [
         },
     },
     {
-        // A generous recent-tool budget carries the heavy tool results through
-        // tools-old; only the preserved-set-free tools-remaining pass clears them.
+        // A generous configured tool budget is capped by the full target;
+        // an oversized old result must not make the next provider request overflow.
         name: "through-tools-remaining",
         messages: toolsHeavyConversation,
         options: { contextLimit: 3_000, recentToolResultBudgetTokens: 5_000 },
@@ -405,13 +405,13 @@ const scenarios: Scenario[] = [
             const names = plan.stages.map((stage) => stage.name)
             assert.ok(names.includes("reasoning"))
             assert.ok(names.includes("tools-remaining"))
-            assert.equal(plan.preservedToolCallIds.length, 2)
+            assert.equal(plan.preservedToolCallIds.length, 1)
         },
     },
     {
         name: "assistant-runs-pending-jobs",
         messages: multiRunConversation,
-        options: { contextLimit: 9_000, recentToolResultBudgetTokens: 0 },
+        options: { contextLimit: 9_000, recentToolResultBudgetTokens: 0, recentAssistantOutputs: 0 },
         replays: [
             { name: "identical" },
             {
@@ -432,7 +432,7 @@ const scenarios: Scenario[] = [
     {
         name: "assistant-runs-with-summaries",
         messages: multiRunConversation,
-        options: { contextLimit: 9_000, recentToolResultBudgetTokens: 0 },
+        options: { contextLimit: 9_000, recentToolResultBudgetTokens: 0, recentAssistantOutputs: 0 },
         summariesText: "Accepted summary: shipped the first task end to end.",
         replays: [{ name: "identical" }],
         expect: (plan) => {

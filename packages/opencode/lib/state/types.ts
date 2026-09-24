@@ -1,4 +1,4 @@
-import type { PlanSnapshot } from "@better-compact/core"
+import type { CompactionConfig, PlanSnapshot } from "@better-compact/core"
 import { Message, Part } from "@opencode-ai/sdk/v2"
 
 export interface WithParts {
@@ -37,8 +37,8 @@ export interface BoundaryJobProgress {
         summaryJobsSucceeded?: number
         summaryJobsFailed?: number
         beforeTokens?: number
-        afterTokens?: number
         currentTokens?: number
+        afterTokens?: number
         targetTokens?: number
         contextLimit?: number
         stageClearedTokens?: number
@@ -68,6 +68,38 @@ export interface BoundaryPlanSnapshot extends PlanSnapshot {
 export interface BoundaryState {
     job: BoundaryJobProgress | null
     activePlan: BoundaryPlanSnapshot | null
+    /** Manual request waiting for the next completed assistant/tool step or idle. */
+    queuedManual?: {
+        requestedAt: number
+        jobId?: string
+        jobStartedAt?: number
+        lastUserMessageId?: string
+        lastEligibleFingerprint?: string
+        params?: {
+            providerId: string | undefined
+            modelId: string | undefined
+            agent: string | undefined
+            variant: string | undefined
+        }
+        compaction?: Partial<CompactionConfig>
+        contextLimit?: number
+        currentTokens?: number
+        summaryVariant?: string
+    }
+    lastIdleUsageMessageId?: string
+    /** Provider response already used to build the active automatic plan. */
+    lastPlannedUsageMessageId?: string
+    automaticCheck?: {
+        at: string
+        count: number
+        /** Which supported host seam actually ran (legacy snapshots may omit it). */
+        seam?: "pre_request" | "idle"
+        reason: string
+        providerTokens: number
+        estimatedTokens: number
+        triggerTokens: number
+        contextLimit: number | null
+    }
 }
 
 export interface SessionState {

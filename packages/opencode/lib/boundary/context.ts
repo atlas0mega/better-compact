@@ -23,6 +23,30 @@ import {
 import { boundaryRangeHash } from "./fingerprint"
 import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore, transcriptCitablePath } from "./transcripts"
+import { inheritArchiveCatalog } from "./archive-catalog"
+import { getCurrentTokenUsage, getCurrentUsageMessageId } from "../token-utils"
+
+/** Align provider usage with the history at its request, before new tool/output parts. */
+export function providerAlignedHistoryTokens(
+    state: SessionState,
+    messages: WithParts[],
+    reportedTokens?: number,
+): number | undefined {
+    if (!reportedTokens || getCurrentTokenUsage(state, messages) !== reportedTokens) return undefined
+    const usageId = getCurrentUsageMessageId(state, messages)
+    const index = messages.findIndex((message) => message.info.id === usageId)
+    if (index < 0) return undefined
+    const earlier = structuredClone(messages.slice(0, index))
+    if (state.boundary.activePlan && earlier.length > 0)
+        applyBoundaryPlanSnapshot(earlier, state.boundary.activePlan, { allowRegrown: true })
+    const info = messages[index].info
+    if (info.role !== "assistant") return undefined
+    return (
+        openCodeCodec.estimateTurns(openCodeCodec.encode(earlier)) +
+        (info.tokens?.output ?? 0) +
+        (info.tokens?.reasoning ?? 0)
+    )
+}
 
 export type {
     BoundaryContextOptions,
@@ -49,13 +73,46 @@ export function adaptiveTailUserTurns(
     return twoUserTail > target ? 1 : 2
 }
 
+/** Move complete older assistant/tool turns after a sparse user turn only when
+ * their full archived handoff actually makes the outgoing plan smaller. */
+export function efficientAgenticTailBudget(
+    messages: WithParts[],
+    options: BoundaryContextOptions,
+): { floor: number; ceiling: number } | undefined {
+    const target =
+        options.targetTokens ??
+        Math.floor((options.contextLimit ?? 0) * (options.targetRatio ?? 0.3))
+    if (target <= 0) return undefined
+    const turns = openCodeCodec.encode(messages)
+    const lastUser = turns.findLastIndex((turn) => turn.role === "user" && !turn.ephemeral)
+    if (lastUser < 0 || openCodeCodec.estimateTurns(turns.slice(lastUser)) <= target)
+        return undefined
+    const floor = Math.min(4_096, Math.max(1, Math.floor(target * 0.25)))
+    const budget = { floor, ceiling: Math.max(floor, Math.floor(target * 0.6)) }
+    const baseline = buildBoundaryContextPlan(messages, { ...options, force: true })
+    const candidate = buildBoundaryContextPlan(messages, {
+        ...options,
+        force: true,
+        tailBudgetTokens: budget,
+    })
+    if (!candidate || (baseline && candidate.afterPruneTokens >= baseline.afterPruneTokens))
+        return undefined
+    return budget
+}
+
 export function buildBoundaryContextPlan(
     messages: WithParts[],
     options: BoundaryContextOptions = {},
 ): BoundaryContextPlan | null {
     return buildPlan(
         openCodeCodec.encode(messages),
-        { ...options, sessionKey: sessionKeyOf(messages), citablePath: transcriptCitablePath },
+        {
+            ...options,
+            preservePrefixBudgets: true,
+            recentAssistantOutputs: options.recentAssistantOutputs ?? 5,
+            sessionKey: sessionKeyOf(messages),
+            citablePath: transcriptCitablePath,
+        },
         openCodeSpec,
     )
 }
@@ -75,6 +132,14 @@ export function applyBoundaryPlanSnapshot(
     snapshot: BoundaryPlanSnapshot,
     options: ReplayOptions = {},
 ): boolean {
+    if (
+        snapshot.prefixFingerprint &&
+        snapshot.compactedMessageCount !== undefined &&
+        (snapshot.compactedMessageCount > messages.length ||
+            boundaryRangeHash(messages.slice(0, snapshot.compactedMessageCount)) !==
+                snapshot.prefixFingerprint)
+    )
+        return false
     const replayed = replayPlanSnapshot(
         openCodeCodec.encode(messages),
         snapshot,
@@ -123,7 +188,15 @@ export async function findMatchingBoundaryPlan(
     messages: WithParts[],
     directory: string,
     logger: Logger,
+    resolveTitle?: (sessionId: string) => Promise<string | undefined>,
 ): Promise<BoundaryPlanSnapshot | null> {
+    // OpenCode's session.fork clones message content but does not set parentID.
+    // The host does mark forks with a derived title. Require that marker plus
+    // content identity so an independent session with a common short prefix
+    // cannot acquire the first matching owner's private archive link.
+    if (!resolveTitle) return null
+    const forkTitle = await resolveTitle(sessionId).catch(() => undefined)
+    if (!forkTitle || !/ \(fork #\d+\)$/.test(forkTitle)) return null
     const plans = await loadPersistedBoundaryPlans(logger)
     const hashes = new Map<number, string>()
     for (const plan of plans) {
@@ -135,7 +208,10 @@ export async function findMatchingBoundaryPlan(
             hashes.get(compactedCount) ?? boundaryRangeHash(messages.slice(0, compactedCount))
         hashes.set(compactedCount, hash)
         if (hash !== plan.prefixFingerprint) continue
+        const ownerTitle = await resolveTitle(plan.sessionId).catch(() => undefined)
+        if (!ownerTitle || forkTitleOf(ownerTitle) !== forkTitle) continue
         if (!existsSync(join(directory, plan.transcriptRelativePath))) continue
+        await inheritArchiveCatalog(directory, sessionId, plan.sessionId, hash)
         return {
             ...plan,
             sessionId,
@@ -144,6 +220,13 @@ export async function findMatchingBoundaryPlan(
         }
     }
     return null
+}
+
+function forkTitleOf(title: string): string {
+    const previous = title.match(/^(.+) \(fork #(\d+)\)$/)
+    return previous
+        ? `${previous[1]} (fork #${Number(previous[2]) + 1})`
+        : `${title} (fork #1)`
 }
 
 export async function writeBoundaryTranscript(

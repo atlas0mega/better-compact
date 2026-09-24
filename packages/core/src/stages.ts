@@ -17,7 +17,11 @@ export interface StageContext {
     estimator: Estimator
     rawTailStartIndex: number
     transcriptRelativePath: string
+    archiveCatalogText?: string
     preservedToolCallIds: ReadonlySet<string>
+    protectRecentTools?: boolean
+    preservedReasoningItemKeys: ReadonlySet<string>
+    protectedAssistantItemKeys?: ReadonlySet<string>
     // Latest todo across the original compacted range; preserved tool items
     // folded into a collapsed run still surface their todo state.
     latestTodoCallId: string | null
@@ -84,13 +88,18 @@ export const reasoningStage: Stage = {
     name: "reasoning",
     label: "Pruned thinking tokens",
     run: (working, ctx) =>
-        stripAssistantItems(working, ctx.rawTailStartIndex, (item) => item.kind === "reasoning"),
+        stripAssistantItems(
+            working,
+            ctx.rawTailStartIndex,
+            (item) => item.kind === "reasoning" && !ctx.preservedReasoningItemKeys.has(item.key),
+        ),
 }
 
 export const toolsRemainingStage: Stage = {
     name: "tools-remaining",
     label: "Pruned remaining tool calls/results",
-    run: (working, ctx) => stripToolItems(working, ctx, new Set()),
+    run: (working, ctx) =>
+        stripToolItems(working, ctx, ctx.protectRecentTools ? ctx.preservedToolCallIds : new Set()),
 }
 
 export const assistantRunsStage: Stage = {
@@ -150,6 +159,7 @@ export function findRecentToolCallTail(
     budgetTokens: number,
     codec: CodecOps,
     conventions: Conventions,
+    strictBudget = false,
 ): Set<string> {
     const preserved = new Set<string>()
     if (budgetTokens <= 0) return preserved
@@ -160,7 +170,10 @@ export function findRecentToolCallTail(
         if (turn.role === "user" && turn.prunableToolLike) {
             const cost = Math.max(1, Math.round(codec.estimateTurns([turn])))
             if (used >= budgetTokens) return preserved
-            if (preserved.size > 0 && used + cost > budgetTokens) return preserved
+            if (used + cost > budgetTokens) {
+                if (strictBudget) continue
+                if (preserved.size > 0) return preserved
+            }
             preserved.add(turn.key)
             used += cost
             continue
@@ -174,7 +187,10 @@ export function findRecentToolCallTail(
 
             const cost = Math.max(1, Math.round(codec.estimateItem(item)))
             if (used >= budgetTokens) return preserved
-            if (preserved.size > 0 && used + cost > budgetTokens) return preserved
+            if (used + cost > budgetTokens) {
+                if (strictBudget) continue
+                if (preserved.size > 0) return preserved
+            }
             preserved.add(item.callId)
             used += cost
         }
@@ -206,11 +222,25 @@ export function transformCompactedPrefix(turns: Turn[], ctx: StageContext): Turn
     // must agree or a selected key finds nothing to collapse and the plan
     // promises savings the applied output never delivers.
     return turns.map((turn) => {
-        if (turn.role === "user" || isPreservedTurn(turn, ctx.conventions)) return turn
+        if (
+            turn.role === "user" ||
+            isPreservedTurn(turn, ctx.conventions) ||
+            hasProtectedParts(turn, ctx)
+        ) return turn
         return ctx.assistantSummaryKeys.has(assistantRunKey([turn]))
             ? collapseAssistantRun([turn], ctx)
             : turn
     })
+}
+
+function hasProtectedParts(turn: Turn, ctx: StageContext): boolean {
+    if (!ctx.protectRecentTools) return false
+    return turn.items.some(
+        (item) =>
+            (item.kind === "tool" && ctx.preservedToolCallIds.has(item.callId)) ||
+            (item.kind === "reasoning" && ctx.preservedReasoningItemKeys.has(item.key)) ||
+            (item.kind === "text" && ctx.protectedAssistantItemKeys?.has(item.key)),
+    )
 }
 
 export function turnText(turn: Turn): string {
@@ -245,6 +275,37 @@ export function formatPrefixSummary(
             (text) => `Resume from prior assistant progress: ${formatSummaryItem(text)}`,
         ),
     ])
+}
+
+/** Carry a checkpoint forward without recreating its old facts from stripped turns. */
+export function extendPrefixSummary(
+    previous: string,
+    delta: Turn[],
+    conventions?: Conventions,
+    rawTail: Turn[] = [],
+): string | null {
+    const constraints = previous.lastIndexOf("\n## Constraints\n")
+    const nextStep = previous.lastIndexOf("\n## Next step\n")
+    if (!previous.startsWith("## Decisions\n") || constraints < 0 || nextStep <= constraints)
+        return null
+
+    const users = prefixUserMessages(delta, conventions, rawTail)
+    const progress = delta
+        .filter((turn) => turn.role === "assistant")
+        .map((turn) => turnText(turn).trim())
+        .filter(Boolean)
+        .map((text) => `- Resume from prior assistant progress: ${formatSummaryItem(text)}`)
+    let first = previous.slice(0, nextStep)
+    let last = previous.slice(nextStep + "\n## Next step\n".length).trimEnd()
+    if (users.length > 0) {
+        first = first.replace(/- \(none\)\n$/, "")
+        first += `${users.map((text) => `- ${text}`).join("\n")}\n`
+    }
+    if (progress.length > 0) {
+        if (last === "- (none)") last = ""
+        last += `${last ? "\n" : ""}${progress.join("\n")}`
+    }
+    return `${first}\n## Next step\n${last}`
 }
 
 export function prefixUserMessages(
@@ -442,7 +503,10 @@ function stripToolItems(
         const turn = working[index]
         if (turn?.role === "user" && turn.prunableToolLike) {
             if (preserved.has(turn.key)) continue
-            const text = `[tool:plugin-injection] Historical generated prompt pruned; full text: ${ctx.transcriptRelativePath}`
+            const text =
+                ctx.archiveCatalogText === undefined
+                    ? `[tool:plugin-injection] Historical generated prompt pruned; full text: ${ctx.transcriptRelativePath}`
+                    : "[tool:plugin-injection] Historical generated prompt pruned; use better_compact_recall if needed."
             changedItems += turn.items.length
             turn.items = [syntheticText(turn, text)]
             turn.prunableToolLike = false
@@ -602,6 +666,7 @@ function selectAssistantRunsToSummarize(
     // summarizing it is worth an LLM call. Age used to weight this, which let a
     // small old turn outrank a large recent one and spent calls for little.
     const candidates = assistantGroups(compacted, ctx.conventions)
+        .filter((group) => !group.turns.some((turn) => hasProtectedParts(turn, ctx)))
         .map((group) => {
             const before = estimateTurns(group.turns, ctx.codec, { overheadTokens: 0 })
             const summaryText = group.turns.map(turnText).filter(Boolean).join("\n\n")
@@ -696,7 +761,8 @@ function collapseAssistantRun(group: Turn[], ctx: StageContext): Turn {
         if (note) lines.push(note)
     }
     if (latestTodoState) lines.push(latestTodoState)
-    lines.push(`Raw transcript: ${ctx.transcriptRelativePath}`)
+    if (ctx.archiveCatalogText === undefined)
+        lines.push(`Raw transcript: ${ctx.transcriptRelativePath}`)
 
     return {
         key: first.key,

@@ -125,6 +125,27 @@ test("boundary report shows visual context bars without internal threshold jargo
     assert.doesNotMatch(report, /Last-resort target/i)
 })
 
+test("zero model calls labels deterministic prefix savings without implying Luna output", () => {
+    const plan = buildBoundaryContextPlan(
+        [
+            message("u1", "user", [textPart("u1", "Keep current goals")], 1),
+            message("a1", "assistant", [textPart("a1", "Earlier implementation ".repeat(100))], 2),
+            message("u2", "user", [textPart("u2", "Continue")], 3),
+            message("a2", "assistant", [textPart("a2", "Recent work")], 4),
+            message("u3", "user", [textPart("u3", "Current action")], 5),
+        ],
+        { contextLimit: 100, force: true, prefixSummaryAllowed: true },
+    )
+    assert.ok(plan)
+    const report = formatBoundaryReport(plan, undefined, 0)
+    assert.match(
+        report,
+        /Luna calls: 0\. Stage changes are context deltas, not model response sizes/,
+    )
+    if (plan.stages.some((stage) => stage.name === "prefix-summary" && stage.status !== "skipped"))
+        assert.match(report, /Deterministic prefix fallback/)
+})
+
 test("an applied summary stage with no net savings is not reported as unused", () => {
     const plan = buildBoundaryContextPlan(
         [
@@ -155,4 +176,59 @@ test("an applied summary stage with no net savings is not reported as unused", (
     })
     assert.match(report, /Summarized assistant turns\s+applied \(no net savings\)/)
     assert.doesNotMatch(report, /Summarized assistant turns\s+not needed/)
+})
+
+test("report distinguishes expanding stages and unmet target from provider starting usage", () => {
+    const plan = buildBoundaryContextPlan(
+        [
+            message("u-1", "user", [textPart("u-1", "Old task")], 1),
+            message("a-1", "assistant", [textPart("a-1", "Old reply ".repeat(1_000))], 2),
+            message("u-2", "user", [textPart("u-2", "New task")], 3),
+            message("a-2", "assistant", [textPart("a-2", "New reply")], 4),
+            message("u-3", "user", [textPart("u-3", "Latest task")], 5),
+        ],
+        { contextLimit: 40_000, force: true },
+    )
+    assert.ok(plan)
+    const report = formatBoundaryReport({
+        ...plan,
+        beforeTokens: 20_000,
+        afterPruneTokens: 15_000,
+        targetTokens: 8_000,
+        stages: [
+            {
+                name: "assistant-runs",
+                label: "Summarized assistant turns",
+                status: "applied",
+                clearedTokens: 0,
+                changedMessages: 1,
+                changedParts: 1,
+                beforeTokens: 30_000,
+                afterTokens: 35_000,
+            },
+        ],
+    })
+    assert.match(report, /Summarized assistant turns\s+increased \+5K/)
+    assert.match(report, /Target 8K; 7K still above target/)
+    assert.match(report, /30K local raw estimate; Before is provider-reported/)
+})
+
+test("above-target report identifies the largest final retained components", () => {
+    const plan = buildBoundaryContextPlan(
+        [
+            message("u-1", "user", [textPart("u-1", "Older instruction")], 1),
+            message("a-1", "assistant", [textPart("a-1", "Old work ".repeat(400))], 2),
+            message("u-2", "user", [textPart("u-2", "Continue")], 3),
+            message("a-2", "assistant", [textPart("a-2", "Recent work ".repeat(100))], 4),
+            message("u-3", "user", [textPart("u-3", "Current work")], 5),
+        ],
+        { contextLimit: 20_000, force: true, targetTokens: 1, archiveCatalogText: "" },
+    )
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.ok(plan.residual)
+    const report = formatBoundaryReport(plan)
+    assert.match(report, /still above target/)
+    assert.match(report, /Largest retained components: /)
+    assert.match(report, /recent raw tail|handoff\/reference and archive catalog/)
+    assert.doesNotMatch(report, /Largest retained components: .*undefined/)
 })

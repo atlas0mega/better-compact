@@ -17,6 +17,7 @@ interface SummarizeBoundaryJobsInput {
     runtime: RuntimeState
     logger: Logger
     parentSessionId: string
+    directory?: string
     jobs: BoundarySummaryJob[]
     params: {
         providerId: string | undefined
@@ -28,6 +29,7 @@ interface SummarizeBoundaryJobsInput {
     maxBatchTokens?: number
     maxJobsPerBatch?: number
     rejectOversized?: boolean
+    maxSummaryChars?: number
     summaryEffort?: SummaryEffort
     summaryModel?: string | null
     onProgress?: (event: SummarizeProgressEvent) => Promise<void> | void
@@ -49,6 +51,7 @@ export async function summarizeBoundaryJobs(
         maxBatchTokens: input.maxBatchTokens,
         maxJobsPerBatch: input.maxJobsPerBatch,
         rejectOversized: input.rejectOversized,
+        maxSummaryChars: input.maxSummaryChars,
         onProgress: input.onProgress,
     })
 }
@@ -77,12 +80,24 @@ export async function summarizePrefixChunks(
     const modelInputTokens = context - Math.max(8_192, Math.ceil(context * 0.15))
     const chunks = buildPrefixChunks(input.plan, modelInputTokens)
     if (chunks.length === 0) return undefined
+    // 4k characters suffices for one turn, not a 20k-token chronological
+    // segment. Let output scale sublinearly with input without clipping it.
+    const maxSummaryChars = Math.min(
+        50_000,
+        Math.ceil(
+            4_000 *
+                Math.sqrt(
+                    Math.max(1, ...chunks.map((chunk) => countTokens(chunk.job.prompt))) / 1_000,
+                ),
+        ),
+    )
     const summaries = await summarizeBoundaryJobs({
         ...input,
         jobs: chunks.map((chunk) => chunk.job),
         maxBatchTokens: modelInputTokens,
         maxJobsPerBatch: 1,
         rejectOversized: true,
+        maxSummaryChars,
     })
     if (chunks.some((chunk) => !summaries[chunk.job.key])) return null
     if (
@@ -106,7 +121,7 @@ export async function summarizePrefixChunks(
         : null
 }
 
-function summaryModelParams(
+export function summaryModelParams(
     input: Pick<SummarizeBoundaryJobsInput, "params" | "summaryModel">,
 ): SummarizeBoundaryJobsInput["params"] {
     const model = input.summaryModel
@@ -126,7 +141,7 @@ function summaryModelParams(
     }
 }
 
-/** Resolve only advertised variants; unsupported efforts retain the active variant. */
+/** Honor explicit efforts when the v1 provider API omits variant metadata. */
 export async function resolveCompactionVariant(
     client: any,
     params: SummarizeBoundaryJobsInput["params"],
@@ -140,11 +155,17 @@ export async function resolveCompactionVariant(
             ? payload
             : (payload?.all ?? payload?.providers ?? [])
         const provider = providers.find((item: any) => item?.id === params.providerId)
-        const variants = provider?.models?.[params.modelId ?? ""]?.variants ?? {}
+        const model = provider?.models?.[params.modelId ?? ""]
+        if (!model) return params.variant ?? (effort === "max" ? undefined : effort)
+        const variants = model.variants ?? {}
         const candidates = effort === "max" ? ["max", "xhigh"] : [effort]
+        // The installed v1 SDK's provider.list() model omits variants entirely.
+        // An explicitly configured effort must still reach the scratch prompt;
+        // otherwise a different summary model silently runs at its default.
+        if (!Object.keys(variants).length && effort !== "max") return effort
         return candidates.find((candidate) => Object.hasOwn(variants, candidate)) ?? params.variant
     } catch {
-        return params.variant
+        return effort === "max" ? params.variant : effort
     }
 }
 
@@ -168,7 +189,7 @@ function createScratchSummarizer(input: SummarizeBoundaryJobsInput): Summarizer 
                     : `Summarize ${jobs.length} independent historical assistant turns.`,
                 "Return ONLY a JSON object mapping each job key to its own Markdown summary.",
                 "Each summary must contain the six headings specified in its job prompt, in order.",
-                `Keep each summary within 4000 characters and the full JSON response within about ${Math.ceil(4_000 * Math.sqrt(jobs.length))} characters. Preserve each assigned ${prefixChunks ? "segment" : "turn"}; do not combine jobs or omit keys.`,
+                `Keep each summary within ${prefixChunks ? (input.maxSummaryChars ?? 4_000) : 4_000} characters and the full JSON response within about ${prefixChunks ? (input.maxSummaryChars ?? 4_000) * jobs.length : Math.ceil(4_000 * Math.sqrt(jobs.length))} characters. Preserve each assigned ${prefixChunks ? "segment" : "turn"}; do not combine jobs or omit keys.`,
                 ...jobs.map((job, index) =>
                     [`\n--- Job ${index + 1}: ${JSON.stringify(job.key)} ---`, job.prompt].join(
                         "\n",
@@ -202,7 +223,7 @@ function createScratchSummarizer(input: SummarizeBoundaryJobsInput): Summarizer 
             } catch (error) {
                 input.logger.warn("Invalid grouped scratch summary response", {
                     jobs: jobs.length,
-                    error: error instanceof Error ? error.message : String(error),
+                    error: "invalid_output",
                 })
                 return null
             }
@@ -238,6 +259,7 @@ async function runScratchSummary(
         } satisfies NonNullable<SessionCreateData["body"]>
         const created = await input.client.session.create({
             body,
+            ...(input.directory ? { query: { directory: input.directory } } : {}),
         })
         if (created?.error) throw scratchResponseError("Scratch session creation", created.error)
         scratchSessionId = created?.data?.id ?? created?.id
@@ -246,6 +268,7 @@ async function runScratchSummary(
 
         const response = await input.client.session.prompt({
             path: { id: scratchSessionId },
+            ...(input.directory ? { query: { directory: input.directory } } : {}),
             body: {
                 agent: input.params.agent,
                 model:
@@ -260,22 +283,28 @@ async function runScratchSummary(
             },
         })
         if (response?.error) throw scratchResponseError("Scratch session prompt", response.error)
+        const appliedVariant = response?.data?.info?.variant ?? response?.info?.variant
+        if (input.params.variant && appliedVariant && appliedVariant !== input.params.variant)
+            throw new Error("Scratch session did not apply the requested summary variant")
         return extractAssistantText(response?.data ?? response)
     } catch (error) {
         input.logger.warn("Better Compact scratch summarization failed", {
             rangeStartMessageId: first.rangeStartMessageId,
             rangeEndMessageId: last.rangeEndMessageId,
-            error: error instanceof Error ? error.message : String(error),
+            error: safeScratchError(error),
         })
         return null
     } finally {
         if (scratchSessionId) {
             try {
-                await input.client.session.delete({ path: { id: scratchSessionId } })
+                await input.client.session.delete({
+                    path: { id: scratchSessionId },
+                    ...(input.directory ? { query: { directory: input.directory } } : {}),
+                })
             } catch (error) {
                 input.logger.warn("Failed to delete Better Compact scratch session", {
                     scratchSessionId,
-                    error: error instanceof Error ? error.message : String(error),
+                    error: safeScratchError(error),
                 })
             } finally {
                 untrackScratch?.()
@@ -284,11 +313,64 @@ async function runScratchSummary(
     }
 }
 
-function scratchResponseError(operation: string, error: any): Error {
-    const message = error instanceof Error ? error.message : error?.message
-    return new Error(
-        `${operation} failed: ${typeof message === "string" ? message : "server returned an error"}`,
+/** One separately accounted scratch attempt for archive evidence or handoff. */
+export async function requestArchiveSummary(input: {
+    client: any
+    runtime: RuntimeState
+    logger: Logger
+    parentSessionId: string
+    directory?: string
+    params: SummarizeBoundaryJobsInput["params"]
+    summaryModel?: string | null
+    summaryEffort?: SummaryEffort
+    prompt: string
+    rangeStartMessageId: string
+    rangeEndMessageId: string
+}): Promise<string | null> {
+    if (!canRunScratchSession(input.client)) return null
+    const params = summaryModelParams(input)
+    const variant = input.summaryEffort
+        ? await resolveCompactionVariant(input.client, params, input.summaryEffort)
+        : undefined
+    const job: BoundarySummaryJob = {
+        key: `archive:${input.rangeStartMessageId}:${input.rangeEndMessageId}`,
+        rangeStartMessageId: input.rangeStartMessageId,
+        rangeEndMessageId: input.rangeEndMessageId,
+        transcriptRelativePath: "",
+        prompt: input.prompt,
+    }
+    return runScratchSummary(
+        {
+            ...input,
+            jobs: [job],
+            params: { ...params, variant },
+        },
+        [job],
+        input.prompt,
     )
+}
+
+function scratchResponseError(operation: string, error: any): Error {
+    // SDK/provider messages can echo user prompts. Log only bounded machine
+    // fields; raw response text remains in the private provider/session data.
+    const status = error?.status ?? error?.data?.status
+    const code = error?.code ?? error?.name
+    const safeStatus =
+        Number.isInteger(status) && status >= 400 && status <= 599 ? ` HTTP ${status}` : ""
+    const safeCode =
+        typeof code === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,40}$/.test(code) ? ` (${code})` : ""
+    return new Error(`${operation} failed${safeStatus}${safeCode}`)
+}
+
+function safeScratchError(error: unknown): string {
+    const message = error instanceof Error ? error.message : ""
+    // Only strings constructed by scratchResponseError (or our own fixed
+    // guards) can be shown; arbitrary SDK exceptions may echo the prompt.
+    return /^(?:Scratch session (?:creation|prompt) failed(?: HTTP [45]\d{2})?(?: \([A-Za-z][A-Za-z0-9_-]{0,40}\))?|Scratch session creation returned no session ID|Scratch session did not apply the requested summary variant)$/.test(
+        message,
+    )
+        ? message
+        : "transport_error"
 }
 
 function extractAssistantText(message: any): string {

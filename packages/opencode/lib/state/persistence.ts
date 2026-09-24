@@ -10,13 +10,22 @@ import { homedir } from "os"
 import { join } from "path"
 import type { BoundaryPlanSnapshot, SessionState } from "./types"
 import type { Logger } from "../logger"
-import { ensurePrivateDirectory, securePrivateFile, securePrivateTree, writePrivateFile } from "../private-storage"
+import {
+    ensurePrivateDirectory,
+    securePrivateFile,
+    securePrivateTree,
+    writePrivateFile,
+} from "../private-storage"
 
 export interface PersistedSessionState {
     sessionName?: string
     boundary?: {
         activePlan?: SessionState["boundary"]["activePlan"]
         job?: SessionState["boundary"]["job"]
+        automaticCheck?: SessionState["boundary"]["automaticCheck"]
+        queuedManual?: SessionState["boundary"]["queuedManual"]
+        lastIdleUsageMessageId?: string
+        lastPlannedUsageMessageId?: string
     }
     lastUpdated: string
 }
@@ -55,7 +64,9 @@ async function writePersistedSessionState(
     const filePath = getSessionFilePath(sessionId)
     const content = JSON.stringify(state, null, 2)
     const previous = stateWrites.get(sessionId) ?? Promise.resolve()
-    const current = previous.catch(() => {}).then(() => writePrivateFile(filePath, content, STORAGE_DIR))
+    const current = previous
+        .catch(() => {})
+        .then(() => writePrivateFile(filePath, content, STORAGE_DIR))
     stateWrites.set(sessionId, current)
     try {
         await current
@@ -81,6 +92,10 @@ export async function saveSessionState(
         boundary: {
             activePlan: sessionState.boundary.activePlan,
             job: sessionState.boundary.job,
+            automaticCheck: sessionState.boundary.automaticCheck,
+            queuedManual: sessionState.boundary.queuedManual,
+            lastIdleUsageMessageId: sessionState.boundary.lastIdleUsageMessageId,
+            lastPlannedUsageMessageId: sessionState.boundary.lastPlannedUsageMessageId,
         },
         lastUpdated: new Date().toISOString(),
     }
@@ -134,8 +149,12 @@ export async function loadSessionState(
 export async function loadPersistedBoundaryPlans(logger: Logger): Promise<BoundaryPlanSnapshot[]> {
     if (!existsSync(STORAGE_DIR)) return []
     boundaryPlanIndex ??= (async () => {
-        const files = (await fs.readdir(STORAGE_DIR)).filter((file) => file.endsWith(".json")).sort()
-        const states = await Promise.all(files.map((file) => loadSessionState(file.slice(0, -5), logger)))
+        const files = (await fs.readdir(STORAGE_DIR))
+            .filter((file) => file.endsWith(".json"))
+            .sort()
+        const states = await Promise.all(
+            files.map((file) => loadSessionState(file.slice(0, -5), logger)),
+        )
         return states
             .map((state) => state?.boundary?.activePlan)
             .filter((plan): plan is BoundaryPlanSnapshot => !!plan)
