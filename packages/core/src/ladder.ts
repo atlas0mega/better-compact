@@ -363,7 +363,15 @@ export function buildPlan(
         // determines this allowance.
         if (inputs.preservePrefixBudgets) {
             const source = nativePrefixSource ?? working
-            const preview = cloneTurns(source)
+            // Assistant-run grouping changes the working array's length. The
+            // source was captured before that grouping, so its boundary is the
+            // original partition index, not currentTailStartIndex.
+            const sourcePrefixEnd = nativePrefixSource
+                ? partition.rawTailStartIndex
+                : currentTailStartIndex > 0
+                  ? currentTailStartIndex
+                  : partition.rawTailStartIndex
+            const preview = cloneTurns(working)
             applyPrefixSummary(
                 preview,
                 currentTailStartIndex > 0 ? currentTailStartIndex : partition.rawTailStartIndex,
@@ -376,13 +384,12 @@ export function buildPlan(
                 new Set(),
                 undefined,
                 anchored?.textKeys,
+                sourcePrefixEnd,
             )
             let headroom = targetTokens - estimateTurns(preview, spec.codec, estimator)
             const eligibleStart = priorBoundary
                 ? partitionTurns(turns, priorBoundary).compactedRange.length
                 : 0
-            const prefixEnd =
-                currentTailStartIndex > 0 ? currentTailStartIndex : partition.rawTailStartIndex
             const previouslyNative = new Set(prior?.preservedPrefixTurnKeys ?? [])
             // Earlier native prefix turns are a continuity floor until a new,
             // validated handoff can retire the archive cohort containing them.
@@ -393,8 +400,13 @@ export function buildPlan(
                 inputs.prefixSummary !== undefined &&
                 inputs.retirementThrough !== undefined &&
                 inputs.retirementThrough > (prior?.retirementThrough ?? 0)
-            for (const candidate of source.slice(0, prefixEnd)) {
-                if (!previouslyNative.has(candidate.key) || retirePreviousNative) continue
+            for (const candidate of source.slice(0, sourcePrefixEnd)) {
+                if (
+                    !previouslyNative.has(candidate.key) ||
+                    retirePreviousNative ||
+                    candidate.ephemeral
+                )
+                    continue
                 preservedPrefixTurnKeys.push(candidate.key)
                 headroom -= spec.codec.estimateTurns([candidate])
             }
@@ -405,13 +417,80 @@ export function buildPlan(
                 preservedPrefixTurnKeys = [
                     ...new Set([
                         ...preservedPrefixTurnKeys,
-                        ...source.slice(eligibleStart, prefixEnd).map((turn) => turn.key),
+                        ...source.slice(eligibleStart, sourcePrefixEnd).map((turn) => turn.key),
                     ]),
                 ]
             } else {
-                for (let index = prefixEnd - 1; index >= eligibleStart; index--) {
+                // A new genuine user instruction takes priority over assistant
+                // chat. Text already present verbatim in the handoff needs no
+                // duplicate native copy. Generated plugin prompts are never
+                // considered user intent here.
+                for (let index = sourcePrefixEnd - 1; index >= eligibleStart; index--) {
                     const candidate = source[index]
-                    if (previouslyNative.has(candidate.key)) continue
+                    if (
+                        candidate.role !== "user" ||
+                        candidate.ephemeral ||
+                        candidate.prunableToolLike ||
+                        previouslyNative.has(candidate.key)
+                    )
+                        continue
+                    const exact = candidate.items
+                        .filter(
+                            (item): item is Extract<Item, { kind: "text" }> => item.kind === "text",
+                        )
+                        .map((item) => item.text.trim())
+                        .filter(Boolean)
+                    if (
+                        exact.length === 0 ||
+                        exact.every((text) =>
+                            preview[0]?.items.some(
+                                (item) => item.kind === "synthetic" && item.text.includes(text),
+                            ),
+                        )
+                    )
+                        continue
+                    preservedPrefixTurnKeys.unshift(candidate.key)
+                    headroom -= spec.codec.estimateTurns([candidate])
+                }
+                // The five-output anchor protects a coherent reasoning span;
+                // it is not a ceiling on useful assistant chat. Fill remaining
+                // target headroom with the newest whole assistant text outputs
+                // before spending it on old stubs and tool traffic. The source
+                // has already had old tool payloads/reasoning cheaply pruned.
+                if (inputs.recentAssistantOutputs) {
+                    const chatKeys = anchored?.textKeys ?? new Set<string>()
+                    const nativeKeys = new Set(preservedPrefixTurnKeys)
+                    for (let index = sourcePrefixEnd - 1; index >= 0; index--) {
+                        const candidate = source[index]
+                        if (candidate.role !== "assistant" || nativeKeys.has(candidate.key))
+                            continue
+                        const textItems = candidate.items.filter(
+                            (item): item is Extract<Item, { kind: "text" }> =>
+                                item.kind === "text" && item.text.trim().length > 0,
+                        )
+                        if (!textItems.length || textItems.every((item) => chatKeys.has(item.key)))
+                            continue
+                        const addition = textItems.filter((item) => !chatKeys.has(item.key))
+                        const cost = spec.codec.estimateTurns([{ ...candidate, items: addition }])
+                        if (cost > headroom) continue
+                        for (const item of addition) chatKeys.add(item.key)
+                        headroom -= cost
+                    }
+                }
+                for (let index = sourcePrefixEnd - 1; index >= eligibleStart; index--) {
+                    const candidate = source[index]
+                    if (
+                        previouslyNative.has(candidate.key) ||
+                        preservedPrefixTurnKeys.includes(candidate.key) ||
+                        candidate.ephemeral ||
+                        candidate.prunableToolLike ||
+                        (candidate.role === "user" && !candidate.ephemeral) ||
+                        (candidate.role === "assistant" &&
+                            candidate.items.some(
+                                (item) => item.kind === "text" && anchored?.textKeys.has(item.key),
+                            ))
+                    )
+                        continue
                     const cost = spec.codec.estimateTurns([candidate])
                     // A single oversized turn must not strand otherwise useful
                     // smaller native turns below the target.
@@ -433,6 +512,7 @@ export function buildPlan(
             new Set(preservedPrefixTurnKeys),
             nativePrefixSource,
             inputs.preservePrefixBudgets ? anchored?.textKeys : undefined,
+            partition.rawTailStartIndex,
         )
         const afterPrefix = estimateTurns(working, spec.codec, estimator)
         prefixSummary = result.prefixSummary
@@ -1536,6 +1616,7 @@ function applyPrefixSummary(
     preservedPrefixTurnKeys: ReadonlySet<string> = new Set(),
     nativePrefixSource?: Turn[],
     protectedAssistantItemKeys: ReadonlySet<string> = new Set(),
+    nativePrefixEndIndex?: number,
 ): StageMutationResult & { prefixSummary: string } {
     if (rawTailStartIndex <= 0) {
         return {
@@ -1557,14 +1638,14 @@ function applyPrefixSummary(
         compactedRangeHash,
     )
     const preserved = preservedPrefixTurns(
-        compacted,
+        nativePrefixSource?.slice(0, nativePrefixEndIndex ?? rawTailStartIndex) ?? compacted,
         preservedReasoningItemKeys,
         preservedToolCallIds,
         preservedPrefixTurnKeys,
         protectedAssistantItemKeys,
     )
     const native = (nativePrefixSource ?? compacted)
-        .slice(0, rawTailStartIndex)
+        .slice(0, nativePrefixEndIndex ?? rawTailStartIndex)
         .filter((turn) => preservedPrefixTurnKeys.has(turn.key))
     const changedTurns = new Set(compacted.map((turn) => turn.key))
     const changedItems = compacted.reduce((sum, turn) => sum + turn.items.length, 0)

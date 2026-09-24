@@ -784,6 +784,145 @@ test("OpenCode last resort fills available context with newest native prefix tur
     )
 })
 
+test("a long tool loop retains more than five real assistant answers up to the target", () => {
+    const turns = [
+        turn(
+            "human-contract",
+            "user",
+            [textItem("human-contract", "Keep the human contract verbatim")],
+            1,
+        ),
+    ]
+    for (let index = 0; index < 80; index++) {
+        turns.push(
+            turn(
+                `old-tool-${index}`,
+                "assistant",
+                [
+                    toolItem(
+                        `old-tool-${index}`,
+                        "bash",
+                        `Old result ${index}: ${"tool evidence ".repeat(150)}`,
+                    ),
+                ],
+                2 + index,
+            ),
+        )
+    }
+    for (let index = 0; index < 24; index++) {
+        turns.push(
+            turn(
+                `real-answer-${index}`,
+                "assistant",
+                [
+                    textItem(
+                        `real-answer-${index}`,
+                        `Real answer ${index}: ${"confirmed decision ".repeat(90)}`,
+                    ),
+                ],
+                100 + index,
+            ),
+        )
+    }
+    turns.push(
+        turn("latest-human", "user", [textItem("latest-human", "Current human correction")], 200),
+    )
+    const plan = buildPlan(
+        turns,
+        inputs({
+            contextLimit: 80_000,
+            targetTokens: 7_500,
+            force: true,
+            minTailUserTurns: 1,
+            collapsePercent: 1,
+            recentAssistantOutputs: 5,
+            recentToolResultBudgetTokens: 0,
+            preservePrefixBudgets: true,
+            archiveCatalogText: "- c000001 — Exact earlier results",
+        }),
+        spec,
+    )
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.ok(
+        plan.stages.some((stage) => stage.name === "assistant-runs" && stage.changedMessages > 0),
+    )
+    const applied = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
+    const retained = applied
+        .flatMap((item) => item.items)
+        .filter((item) => item.kind === "text" && item.text.startsWith("Real answer "))
+    assert.ok(
+        retained.length > 5,
+        `only ${retained.length} assistant answers survived; protected=${plan.protectedAssistantItemKeys?.length}, projected=${plan.afterPruneTokens}`,
+    )
+    assert.ok(
+        retained.some((item) => item.kind === "text" && item.text.startsWith("Real answer 23:")),
+    )
+    assert.ok(
+        plan.afterPruneTokens >= plan.targetTokens * 0.8,
+        `${plan.afterPruneTokens} under the ${plan.targetTokens} target`,
+    )
+    assert.ok(plan.afterPruneTokens <= plan.targetTokens)
+    assert.match(applied.map(syntheticTextOf).join("\n"), /Keep the human contract verbatim/)
+    assert.equal(plan.afterPruneTokens, codec.estimateTurns(applied))
+    assert.deepEqual(
+        replayPlanSnapshot(turns, toPlanSnapshot(plan), spec, { allowRegrown: true }),
+        applied,
+    )
+
+    const continued = [
+        ...turns,
+        ...Array.from({ length: 16 }, (_, index) =>
+            turn(
+                `new-answer-${index}`,
+                "assistant",
+                [
+                    textItem(
+                        `new-answer-${index}`,
+                        `New answer ${index}: ${"current finding ".repeat(90)}`,
+                    ),
+                ],
+                201 + index,
+            ),
+        ),
+        turn(
+            "next-human",
+            "user",
+            [textItem("next-human", "Do not lose the newest correction")],
+            300,
+        ),
+    ]
+    const rolled = buildPlan(
+        continued,
+        inputs({
+            contextLimit: 80_000,
+            targetTokens: 9_500,
+            force: true,
+            minTailUserTurns: 1,
+            collapsePercent: 1,
+            recentAssistantOutputs: 5,
+            recentToolResultBudgetTokens: 0,
+            preservePrefixBudgets: true,
+            archiveCatalogText: "- c000001 — Exact earlier results",
+            priorPlan: toPlanSnapshot(plan),
+        }),
+        spec,
+    )
+    assert.ok(rolled?.requiresCustomCompaction)
+    const replayed = transformTurns(continued, rolled.rawTailStartIndex, rolled, spec)
+    const newAnswers = replayed
+        .flatMap((item) => item.items)
+        .filter((item) => item.kind === "text" && item.text.startsWith("New answer "))
+    assert.ok(
+        newAnswers.length > 5,
+        `only ${newAnswers.length} new answers survived rollover; projected=${rolled.afterPruneTokens}, protected=${rolled.protectedAssistantItemKeys?.length}, priorNative=${plan.preservedPrefixTurnKeys?.length}, newNative=${rolled.preservedPrefixTurnKeys?.length}`,
+    )
+    assert.ok(rolled.afterPruneTokens <= rolled.targetTokens)
+    assert.deepEqual(
+        replayPlanSnapshot(continued, toPlanSnapshot(rolled), spec, { allowRegrown: true }),
+        replayed,
+    )
+})
+
 test("OpenCode cheap tool pruning retains newer whole results rather than overshooting the target", () => {
     const turns = [turn("floor-first", "user", [textItem("floor-first", "Preserve the task")], 1)]
     turns.push(

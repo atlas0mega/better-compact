@@ -67,9 +67,20 @@ test("provider overhead aligns to the prior request, not a newly completed tool 
         message("old-assistant", "assistant", [textPart("old-assistant", "Earlier work")], 2),
         message("current-user", "user", [textPart("current-user", "Read synthetic evidence")], 3),
     ]
-    const current = message("current-assistant", "assistant", [textPart("current-assistant", "Checking")], 4)
+    const current = message(
+        "current-assistant",
+        "assistant",
+        [textPart("current-assistant", "Checking")],
+        4,
+    )
     Object.assign(current.info, {
-        tokens: { total: 4_000, input: 900, output: 100, reasoning: 0, cache: { read: 3_000, write: 0 } },
+        tokens: {
+            total: 4_000,
+            input: 900,
+            output: 100,
+            reasoning: 0,
+            cache: { read: 3_000, write: 0 },
+        },
     })
     const messages = [...prior, current]
     const aligned = providerAlignedHistoryTokens(state, messages, 4_000)
@@ -268,6 +279,108 @@ test("Syndicate plugin prompts obey tool retention while real user instructions 
     assert.ok(!cleanedText.text.includes(oldText))
     assert.ok(!cleanedText.text.includes(recentText))
     assert.ok(cleanedText.text.includes("Keep this original instruction exactly."))
+})
+
+test("Sol headroom prioritizes real user wording and more than five assistant answers over injected prompts", () => {
+    const suffix = "\n\n[plugin-injection:12345678-1234-4234-8234-123456789abc]"
+    const messages = [
+        message(
+            "human-original",
+            "user",
+            [textPart("human-original", "Preserve my original requirement exactly")],
+            1,
+        ),
+        ...Array.from({ length: 64 }, (_, index) =>
+            message(
+                `loop-tool-${index}`,
+                "assistant",
+                [
+                    {
+                        id: `loop-tool-${index}-part`,
+                        messageID: `loop-tool-${index}`,
+                        sessionID,
+                        type: "tool",
+                        callID: `call-loop-${index}`,
+                        tool: "bash",
+                        state: {
+                            status: "completed",
+                            input: { command: `check-${index}` },
+                            output: `Archived result ${index}: ${"detail ".repeat(170)}`,
+                            title: "bash",
+                            metadata: {},
+                            time: { start: index + 2, end: index + 3 },
+                        },
+                    } as WithParts["parts"][number],
+                ],
+                index + 2,
+            ),
+        ),
+        message(
+            "injected-old",
+            "user",
+            [textPart("injected-old", `Generated notice ${"payload ".repeat(400)}${suffix}`)],
+            90,
+        ),
+        ...Array.from({ length: 25 }, (_, index) =>
+            message(
+                `answer-${index}`,
+                "assistant",
+                [
+                    textPart(
+                        `answer-${index}`,
+                        `Assistant answer ${index}: ${"confirmed decision ".repeat(100)}`,
+                    ),
+                ],
+                index + 91,
+            ),
+        ),
+        message(
+            "human-current",
+            "user",
+            [textPart("human-current", "Preserve my current correction exactly")],
+            200,
+        ),
+        message(
+            "injected-latest",
+            "user",
+            [textPart("injected-latest", `Generated after human ${suffix}`)],
+            201,
+        ),
+    ]
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 80_000,
+        targetTokens: 8_000,
+        force: true,
+        minTailUserTurns: 1,
+        collapsePercent: 1,
+        recentToolResultBudgetTokens: 0,
+        prefixSummaryAllowed: true,
+        archiveCatalogText: "- c000001 — Earlier session details",
+    })
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.equal(plan.rawTailStartMessageId, "human-current")
+    const applied = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(applied, toBoundaryPlanSnapshot(plan, messages), {
+            allowRegrown: true,
+        }),
+    )
+    const rawChat = applied.filter(
+        (item) =>
+            item.info.role === "assistant" &&
+            item.parts.some(
+                (part) => part.type === "text" && part.text.startsWith("Assistant answer "),
+            ),
+    )
+    assert.ok(rawChat.length > 5, `only ${rawChat.length} assistant answers survived`)
+    assert.ok(plan.afterPruneTokens >= plan.targetTokens * 0.8)
+    assert.ok(plan.afterPruneTokens <= plan.targetTokens)
+    assert.match(plan.prefixSummary ?? "", /Preserve my original requirement exactly/)
+    assert.ok(!plan.prefixSummary?.includes("Generated notice"))
+    assert.ok(!plan.preservedPrefixTurnKeys?.includes("injected-old"))
+    assert.equal(applied.find((item) => item.info.id === "human-current")?.parts[0]?.type, "text")
+    const injected = applied.find((item) => item.info.id === "injected-old")?.parts[0]
+    if (injected?.type === "text") assert.match(injected.text, /Historical generated prompt pruned/)
 })
 
 test("an older cached plan containing plugin prompts replans below trigger once", async () => {

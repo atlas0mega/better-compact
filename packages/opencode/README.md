@@ -173,9 +173,16 @@ prefix starts only above 115% of the target. It retains the newest complete
 pruned turns natively in available projected context, counting protected
 reasoning, tools, the handoff, raw tail, and overhead together. OpenCode also
 anchors its last five real assistant text outputs with the reasoning between
-them, excluding tool calls. A provider-window buffer reserves room for the
-next response; if that reasoning interval cannot fit, the outputs remain
-native and reasoning falls back to its 28k allowance, with the limit reported.
+them, excluding tool calls. **Five is a reasoning-span anchor, not a cap on
+assistant chat:** after reserving genuine user wording, additional whole
+assistant responses can remain native up to the projected target before old
+stubs and tool traffic consume the remaining headroom. Provenance-marked
+Syndicate plugin injections are generated, tool-like traffic, not human turns
+or user-first retention. Previously archived text remains available through
+recall; projected tokens can differ from the next provider reading. A
+provider-window buffer reserves room for the next response; if that reasoning
+interval cannot fit, the outputs remain native and reasoning falls back to its
+28k allowance, with the limit reported.
 A previously applied prefix remains stable on replay. The
 Luna/high **live handoff** runs synchronously before the next provider request
 only when the resulting plan exceeds 115% of the target. It may use at most
