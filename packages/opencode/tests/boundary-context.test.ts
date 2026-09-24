@@ -386,7 +386,9 @@ test("Sol headroom prioritizes real user wording and more than five assistant an
     assert.ok(plan.afterPruneTokens <= plan.targetTokens)
     assert.match(plan.prefixSummary ?? "", /Preserve my original requirement exactly/)
     assert.ok(!plan.prefixSummary?.includes("Generated notice"))
+    assert.ok(plan.preservedPrefixTurnKeys?.includes("human-original"))
     assert.ok(!plan.preservedPrefixTurnKeys?.includes("injected-old"))
+    assert.equal(applied.find((item) => item.info.id === "human-original")?.parts[0]?.type, "text")
     assert.equal(applied.find((item) => item.info.id === "human-current")?.parts[0]?.type, "text")
     const injected = applied.find((item) => item.info.id === "injected-old")?.parts[0]
     if (injected?.type === "text") assert.match(injected.text, /Historical generated prompt pruned/)
@@ -706,6 +708,17 @@ test("prefix summary keeps only the latest goal continuation even when objective
 
     const plan = buildBoundaryContextPlan(messages, { contextLimit: 500, force: true })
     assert.ok(plan?.requiresCustomCompaction)
+    for (const id of ["u-1", "u-3", "u-4", "u-5"]) {
+        assert.equal(
+            openCodeCodec.encode([messages.find((item) => item.info.id === id)!])[0]
+                .generatedTaskState,
+            true,
+        )
+        assert.ok(
+            !plan.preservedPrefixTurnKeys?.includes(id),
+            `${id} is task state, not a reserved human turn`,
+        )
+    }
     assert.ok(plan.prefixSummary?.includes(latest))
     assert.ok(!plan.prefixSummary?.includes(first))
     assert.ok(!plan.prefixSummary?.includes(second))
@@ -729,6 +742,21 @@ test("prefix summary keeps only the latest goal continuation even when objective
     assert.ok(!replacement.prefixSummary.includes(second))
     assert.ok(!replacement.prefixSummary.includes(different))
     assert.ok(replacement.prefixSummary.includes("Please keep this instruction exactly."))
+
+    const legacyWithNativeGoals = {
+        ...legacySnapshot,
+        preservedPrefixTurnKeys: ["u-1", "u-3", "u-4", "u-5"],
+    }
+    const migrated = buildBoundaryContextPlan(messages, {
+        contextLimit: 500,
+        force: true,
+        priorPlan: legacyWithNativeGoals,
+    })
+    assert.ok(migrated)
+    for (const id of ["u-1", "u-3", "u-4"]) {
+        assert.ok(!migrated.preservedPrefixTurnKeys?.includes(id), `${id} was superseded`)
+    }
+    assert.ok(migrated.prefixSummary?.includes(latest))
 
     const replayed = structuredClone(messages)
     assert.ok(applyBoundaryPlanSnapshot(replayed, legacySnapshot, { allowRegrown: true }))
@@ -776,6 +804,38 @@ test("prefix summary keeps only the latest goal continuation even when objective
     const summary = formatPrefixSummary(prefix, openCodeConventions, rawTail)
     assert.ok(!summary.includes("Continue working toward the active session goal."))
     assert.ok(summary.includes("Please keep this instruction exactly."))
+
+    const withAutoContinuation = [
+        ...messages,
+        message(
+            "u-auto",
+            "user",
+            [textPart("u-auto", goalContinuation("active task now", 50))],
+            14,
+        ),
+        message("a-auto", "assistant", [textPart("a-auto", "Continuing the work")], 15),
+    ]
+    const live = buildBoundaryContextPlan(withAutoContinuation, {
+        contextLimit: 20_000,
+        force: true,
+        minTailUserTurns: 1,
+    })
+    assert.ok(live)
+    assert.equal(
+        live.rawTailStartMessageId,
+        "u-7",
+        "automatic goal prompts do not start a new human tail",
+    )
+    const outgoing = structuredClone(withAutoContinuation)
+    assert.ok(
+        applyBoundaryPlanSnapshot(outgoing, toBoundaryPlanSnapshot(live, withAutoContinuation), {
+            allowRegrown: true,
+        }),
+    )
+    assert.ok(
+        outgoing.some((item) => item.info.id === "u-auto"),
+        "latest active goal stays live",
+    )
 })
 
 test("split plans omit whole-message fork identity", () => {

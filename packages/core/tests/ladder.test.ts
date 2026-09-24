@@ -16,6 +16,7 @@ import {
     toPlanSnapshot,
     transformTurns,
     type BuildPlanInputs,
+    type BoundaryContextPlan,
     type CodecOps,
     type Conventions,
     type Item,
@@ -861,7 +862,10 @@ test("a long tool loop retains more than five real assistant answers up to the t
         plan.afterPruneTokens >= plan.targetTokens * 0.8,
         `${plan.afterPruneTokens} under the ${plan.targetTokens} target`,
     )
-    assert.ok(plan.afterPruneTokens <= plan.targetTokens)
+    assert.ok(
+        plan.afterPruneTokens <= plan.targetTokens,
+        `${plan.afterPruneTokens} over the ${plan.targetTokens} target; preserved=${plan.preservedPrefixTurnKeys?.join(",")}`,
+    )
     assert.match(applied.map(syntheticTextOf).join("\n"), /Keep the human contract verbatim/)
     assert.equal(plan.afterPruneTokens, codec.estimateTurns(applied))
     assert.deepEqual(
@@ -920,6 +924,123 @@ test("a long tool loop retains more than five real assistant answers up to the t
     assert.deepEqual(
         replayPlanSnapshot(continued, toPlanSnapshot(rolled), spec, { allowRegrown: true }),
         replayed,
+    )
+})
+
+test("model-scaled user reserve keeps newest archived human turns, not plugin injections", () => {
+    const turns: Turn[] = []
+    for (let index = 0; index < 12; index++) {
+        turns.push(
+            turn(
+                `human-${index}`,
+                "user",
+                [textItem(`human-${index}`, `Human instruction ${index}: ${"detail ".repeat(65)}`)],
+                index * 2 + 1,
+            ),
+            turn(
+                `answer-${index}`,
+                "assistant",
+                [textItem(`answer-${index}`, `Implemented human instruction ${index}.`)],
+                index * 2 + 2,
+            ),
+        )
+    }
+    turns.splice(10, 0, {
+        ...turn(
+            "generated-prompt",
+            "user",
+            [textItem("generated-prompt", "generated ".repeat(300))],
+            11,
+        ),
+        ephemeral: true,
+        prunableToolLike: true,
+    })
+    turns.push(turn("current", "user", [textItem("current", "Newest exact instruction")], 30))
+    const planFor = (contextLimit: number) =>
+        buildPlan(
+            turns,
+            inputs({
+                contextLimit,
+                targetRatio: 0.25,
+                force: true,
+                minTailUserTurns: 1,
+                recentAssistantOutputs: 5,
+                recentToolResultBudgetTokens: 0,
+                preservePrefixBudgets: true,
+                prefixSummaryAllowed: true,
+                prefixSummary:
+                    "## Decisions\n- Keep the newest instruction. Older exact wording remains in the archive.",
+            }),
+            spec,
+        )
+    const small = planFor(12_000)
+    const large = planFor(40_000)
+    assert.ok(small?.requiresCustomCompaction)
+    assert.ok(large?.requiresCustomCompaction)
+    const nativeUsers = (plan: BoundaryContextPlan) =>
+        transformTurns(turns, plan.rawTailStartIndex, plan, spec)
+            .filter((item) => item.role === "user" && item.key.startsWith("human-"))
+            .map((item) => item.key)
+    assert.ok(nativeUsers(small).length > 0)
+    assert.ok(nativeUsers(small).length < nativeUsers(large).length)
+    assert.equal(nativeUsers(large).length, 12)
+    assert.ok(nativeUsers(small).includes("human-11"))
+    for (const plan of [small, large]) {
+        const applied = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
+        assert.ok(plan.afterPruneTokens <= plan.targetTokens)
+        assert.ok(applied.some((item) => item.key === "current"))
+        assert.ok(!applied.some((item) => item.key === "generated-prompt"))
+        assert.deepEqual(
+            replayPlanSnapshot(turns, toPlanSnapshot(plan), spec, { allowRegrown: true }),
+            applied,
+        )
+        assert.ok(plan.transcript.turns?.some((item) => item.key === "human-0"))
+    }
+
+    const continued = [
+        ...turns,
+        turn(
+            "later-answer",
+            "assistant",
+            [textItem("later-answer", "Confirmed the next step")],
+            31,
+        ),
+        turn("later-human", "user", [textItem("later-human", "Newest follow-up verbatim")], 32),
+    ]
+    const nextInput = {
+        contextLimit: 12_000,
+        targetRatio: 0.25,
+        force: true,
+        minTailUserTurns: 1,
+        recentAssistantOutputs: 5,
+        recentToolResultBudgetTokens: 0,
+        preservePrefixBudgets: true,
+        prefixSummaryAllowed: true,
+        prefixSummary:
+            "## Decisions\n- Keep the newest follow-up and the old contract in the archive.",
+        priorPlan: toPlanSnapshot(small),
+    }
+    const pending = buildPlan(continued, inputs(nextInput), spec)
+    assert.ok(pending?.requiresCustomCompaction)
+    for (const key of nativeUsers(small)) {
+        assert.ok(
+            transformTurns(continued, pending.rawTailStartIndex, pending, spec).some(
+                (item) => item.key === key,
+            ),
+            `unvalidated archived user ${key} must remain native`,
+        )
+    }
+    const retired = buildPlan(continued, inputs({ ...nextInput, retirementThrough: 2 }), spec)
+    assert.ok(retired?.requiresCustomCompaction)
+    assert.ok(retired.afterPruneTokens <= retired.targetTokens)
+    assert.ok(
+        transformTurns(continued, retired.rawTailStartIndex, retired, spec).some(
+            (item) => item.key === "human-11",
+        ),
+    )
+    assert.deepEqual(
+        replayPlanSnapshot(continued, toPlanSnapshot(retired), spec, { allowRegrown: true }),
+        transformTurns(continued, retired.rawTailStartIndex, retired, spec),
     )
 })
 

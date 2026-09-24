@@ -370,6 +370,7 @@ export function buildPlan(
                 : currentTailStartIndex > 0
                   ? currentTailStartIndex
                   : partition.rawTailStartIndex
+            const latestTaskStateKey = turns.findLast((turn) => turn.generatedTaskState)?.key
             const preview = cloneTurns(working)
             applyPrefixSummary(
                 preview,
@@ -399,15 +400,28 @@ export function buildPlan(
                 inputs.prefixSummary !== undefined &&
                 inputs.retirementThrough !== undefined &&
                 inputs.retirementThrough > (prior?.retirementThrough ?? 0)
+            // Separate one-turn estimates omit the delimiter between turns in
+            // the final array. Reserve one estimated token per native turn so
+            // independent picks do not collectively overshoot the target.
+            const nativeCost = (turn: Turn) => spec.codec.estimateTurns([turn]) + 1
+            let mandatoryUserTokens = 0
             for (const candidate of source.slice(0, sourcePrefixEnd)) {
                 if (
                     !previouslyNative.has(candidate.key) ||
                     retirePreviousNative ||
-                    candidate.ephemeral
+                    candidate.ephemeral ||
+                    (candidate.generatedTaskState && candidate.key !== latestTaskStateKey)
                 )
                     continue
                 preservedPrefixTurnKeys.push(candidate.key)
-                headroom -= spec.codec.estimateTurns([candidate])
+                const cost = nativeCost(candidate)
+                headroom -= cost
+                if (
+                    candidate.role === "user" &&
+                    !candidate.prunableToolLike &&
+                    !candidate.generatedTaskState
+                )
+                    mandatoryUserTokens += cost
             }
             if (deferPrefix) {
                 // The old checkpoint already covers its earlier prefix. Keep
@@ -416,40 +430,43 @@ export function buildPlan(
                 preservedPrefixTurnKeys = [
                     ...new Set([
                         ...preservedPrefixTurnKeys,
-                        ...source.slice(eligibleStart, sourcePrefixEnd).map((turn) => turn.key),
+                        ...source
+                            .slice(eligibleStart, sourcePrefixEnd)
+                            .filter(
+                                (turn) =>
+                                    !turn.generatedTaskState || turn.key === latestTaskStateKey,
+                            )
+                            .map((turn) => turn.key),
                     ]),
                 ]
             } else {
-                // A new genuine user instruction takes priority over assistant
-                // chat. Text already present verbatim in the handoff needs no
-                // duplicate native copy. Generated plugin prompts are never
-                // considered user intent here.
-                for (let index = sourcePrefixEnd - 1; index >= eligibleStart; index--) {
+                // Retain genuine archived user turns before spending the
+                // remaining target on assistant chat. Cap the *older* native
+                // user cohort at 40% of the target (10% of the model window
+                // with a 25% target), but always keep current raw-tail users
+                // and previously native turns awaiting a validated handoff.
+                // When that cohort is too large, omit older whole turns from
+                // live context; the checkpoint and exact archive retain them.
+                // Provenance-marked plugin prompts are never user intent.
+                let userBudget = Math.max(
+                    0,
+                    Math.min(headroom, Math.floor(targetTokens * 0.4) - mandatoryUserTokens),
+                )
+                for (let index = sourcePrefixEnd - 1; index >= 0; index--) {
                     const candidate = source[index]
                     if (
                         candidate.role !== "user" ||
                         candidate.ephemeral ||
                         candidate.prunableToolLike ||
-                        previouslyNative.has(candidate.key)
+                        candidate.generatedTaskState ||
+                        (previouslyNative.has(candidate.key) && !retirePreviousNative)
                     )
                         continue
-                    const exact = candidate.items
-                        .filter(
-                            (item): item is Extract<Item, { kind: "text" }> => item.kind === "text",
-                        )
-                        .map((item) => item.text.trim())
-                        .filter(Boolean)
-                    if (
-                        exact.length === 0 ||
-                        exact.every((text) =>
-                            preview[0]?.items.some(
-                                (item) => item.kind === "synthetic" && item.text.includes(text),
-                            ),
-                        )
-                    )
-                        continue
+                    const cost = nativeCost(candidate)
+                    if (cost > userBudget) continue
                     preservedPrefixTurnKeys.unshift(candidate.key)
-                    headroom -= spec.codec.estimateTurns([candidate])
+                    userBudget -= cost
+                    headroom -= cost
                 }
                 // The five-output anchor protects a coherent reasoning span;
                 // it is not a ceiling on useful assistant chat. Fill remaining
@@ -470,7 +487,7 @@ export function buildPlan(
                         if (!textItems.length || textItems.every((item) => chatKeys.has(item.key)))
                             continue
                         const addition = textItems.filter((item) => !chatKeys.has(item.key))
-                        const cost = spec.codec.estimateTurns([{ ...candidate, items: addition }])
+                        const cost = nativeCost({ ...candidate, items: addition })
                         if (cost > headroom) continue
                         for (const item of addition) chatKeys.add(item.key)
                         headroom -= cost
@@ -490,7 +507,7 @@ export function buildPlan(
                             ))
                     )
                         continue
-                    const cost = spec.codec.estimateTurns([candidate])
+                    const cost = nativeCost(candidate)
                     // A single oversized turn must not strand otherwise useful
                     // smaller native turns below the target.
                     if (cost > headroom) continue

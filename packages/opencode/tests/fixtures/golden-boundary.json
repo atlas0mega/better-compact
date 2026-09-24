@@ -6614,7 +6614,7 @@
       "rangeHash": "7e93129c2ddaba39",
       "contextLimit": 500,
       "beforeTokens": 11702,
-      "afterPruneTokens": 9110,
+      "afterPruneTokens": 9073,
       "overheadTokens": 0,
       "triggerTokens": 425,
       "targetTokens": 150,
@@ -6631,10 +6631,6 @@
       "anchorReasoningLimited": true,
       "assistantSurvivesPrefix": true,
       "reasoningSurvivesPrefix": false,
-      "preservedPrefixTurnKeys": [
-        "msg-user-1",
-        "msg-user-2"
-      ],
       "preservePrefixBudgets": true,
       "transcript": {
         "relativePath": ".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md",
@@ -6722,8 +6718,8 @@
           "name": "prefix-summary",
           "label": "Last-resort prefix summary",
           "beforeTokens": 9309,
-          "afterTokens": 9110,
-          "clearedTokens": 199,
+          "afterTokens": 9073,
+          "clearedTokens": 236,
           "changedMessages": 5,
           "changedParts": 7,
           "status": "failed"
@@ -6734,10 +6730,10 @@
       "assistantSummaries": {},
       "prefixSummary": "Custom checkpoint: finished task one; task two pending review.",
       "residual": {
-        "rawTailTokens": 55,
+        "rawTailTokens": 19,
         "protectedPartTokens": 0,
         "handoffTokens": 59,
-        "otherTokens": 8996,
+        "otherTokens": 8995,
         "overheadTokens": 0
       }
     },
@@ -6813,54 +6809,6 @@
       },
       {
         "info": {
-          "id": "msg-user-1",
-          "role": "user",
-          "sessionID": "ses_golden_boundary",
-          "agent": "assistant",
-          "model": {
-            "providerID": "anthropic",
-            "modelID": "claude-test"
-          },
-          "time": {
-            "created": 1
-          }
-        },
-        "parts": [
-          {
-            "id": "msg-user-1-text-34",
-            "messageID": "msg-user-1",
-            "sessionID": "ses_golden_boundary",
-            "type": "text",
-            "text": "First task, keep this requirement."
-          }
-        ]
-      },
-      {
-        "info": {
-          "id": "msg-user-2",
-          "role": "user",
-          "sessionID": "ses_golden_boundary",
-          "agent": "assistant",
-          "model": {
-            "providerID": "anthropic",
-            "modelID": "claude-test"
-          },
-          "time": {
-            "created": 4
-          }
-        },
-        "parts": [
-          {
-            "id": "msg-user-2-text-12",
-            "messageID": "msg-user-2",
-            "sessionID": "ses_golden_boundary",
-            "type": "text",
-            "text": "Second task."
-          }
-        ]
-      },
-      {
-        "info": {
           "id": "msg-user-3",
           "role": "user",
           "sessionID": "ses_golden_boundary",
@@ -6930,7 +6878,7 @@
         ]
       }
     ],
-    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before   11.7K / 500     [██████████████████] 2340%\n  Now       9.1K / 500     [██████████████████] 1822% projected\n\n  Reduced 2.6K (22%) projected\n  Target 150; 9K still above target\n  Largest retained components: other retained content ~9K, handoff/reference and archive catalog ~59, recent raw tail ~55\n  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most 0. Exact history remains in the private archive.\n\n  Actions\n  ✓ Pruned old tool calls/results          -1.6K\n  ✓ Pruned thinking tokens                 -1K\n  ✓ Last-resort prefix summary             -199\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n  5 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
+    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before   11.7K / 500     [██████████████████] 2340%\n  Now       9.1K / 500     [██████████████████] 1815% projected\n\n  Reduced 2.6K (22%) projected\n  Target 150; 8.9K still above target\n  Largest retained components: other retained content ~9K, handoff/reference and archive catalog ~59, recent raw tail ~19\n  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most 0. Exact history remains in the private archive.\n\n  Actions\n  ✓ Pruned old tool calls/results          -1.6K\n  ✓ Pruned thinking tokens                 -1K\n  ✓ Last-resort prefix summary             -236\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md\n  5 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
     "snapshot": {
       "sessionId": "ses_golden_boundary",
       "rangeHash": "7e93129c2ddaba39",
@@ -6938,12 +6886,12 @@
       "rawTailStartMessageId": "msg-user-3",
       "transcriptRelativePath": ".opencode/better-compact/sessions/ses_golden_boundary/7e93129c2ddaba39.md",
       "beforeTokens": 11702,
-      "afterPruneTokens": 9110,
+      "afterPruneTokens": 9073,
       "residual": {
-        "rawTailTokens": 55,
+        "rawTailTokens": 19,
         "protectedPartTokens": 0,
         "handoffTokens": 59,
-        "otherTokens": 8996,
+        "otherTokens": 8995,
         "overheadTokens": 0
       },
       "overheadTokens": 0,
@@ -6961,10 +6909,6 @@
       "preservedToolCallIds": [],
       "toolSurvivesPrefix": false,
       "reasoningSurvivesPrefix": false,
-      "preservedPrefixTurnKeys": [
-        "msg-user-1",
-        "msg-user-2"
-      ],
       "assistantSummaryKeys": [],
       "assistantSummaries": {},
       "prefixSummary": "Custom checkpoint: finished task one; task two pending review.",
@@ -7043,8 +6987,8 @@
           "name": "prefix-summary",
           "label": "Last-resort prefix summary",
           "beforeTokens": 9309,
-          "afterTokens": 9110,
-          "clearedTokens": 199,
+          "afterTokens": 9073,
+          "clearedTokens": 236,
           "changedMessages": 5,
           "changedParts": 7,
           "status": "failed"

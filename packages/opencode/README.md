@@ -188,9 +188,21 @@ assistant chat:** after reserving genuine user wording, additional whole
 assistant responses can remain native up to the projected target before old
 stubs and tool traffic consume the remaining headroom. Provenance-marked
 Syndicate plugin injections are generated, tool-like traffic, not human turns
-or user-first retention. Previously archived text remains available through
-recall; projected tokens can differ from the next provider reading. A
-provider-window buffer reserves room for the next response; if that reasoning
+or user-first retention. The shared injection-body helper used by the ZIP's
+enforcers and `teams-md` appends the provenance marker; the OpenCode adapter
+classifies those messages in one reusable helper. Older genuine human turns
+get a model-scaled native reserve of up to 40% of the target (10% of the
+context window at a 25% target), limited by the actual remaining headroom
+after the current raw tail, handoff, and protected parts. If older turns exceed
+that reserve, the newest complete ones win; the handoff carries task intent
+and the exact older wording remains in the private archive for recall. The
+current raw user turn and previously native wording awaiting a validated
+handoff are never cut for this reserve. A goal-plugin automatic continuation
+or limit notice is also excluded from the human reserve and user-tail boundary,
+while its latest objective/state remains in the live task handoff (or current
+raw tail); it is not discarded as routine
+tool output. Projected tokens can differ from the next provider reading. A
+provider-window buffer reserves room for the next response; if the reasoning
 interval cannot fit, the outputs remain native and reasoning falls back to its
 28k allowance, with the limit reported.
 A previously applied prefix remains stable on replay. The

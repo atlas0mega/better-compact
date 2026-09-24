@@ -120,7 +120,12 @@ export function findRawTailStartIndex(
 ): number {
     let userTurns = 0
     for (let index = turns.length - 1; index >= 0; index--) {
-        if (turns[index].role !== "user" || turns[index].ephemeral) continue
+        if (
+            turns[index].role !== "user" ||
+            turns[index].ephemeral ||
+            turns[index].generatedTaskState
+        )
+            continue
         userTurns++
         if (userTurns >= minUserTurns) return index
     }
@@ -152,7 +157,7 @@ export function findBudgetTailStartIndex(
     // ones open an even smaller tail, so if this one breaks the floor they all do.
     for (let index = start; index < turns.length; index++) {
         const turn = turns[index]
-        if (turn.role !== "user" || turn.ephemeral) continue
+        if (turn.role !== "user" || turn.ephemeral || turn.generatedTaskState) continue
         if (suffix[index] >= budget.floor) start = index
         break
     }

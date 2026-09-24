@@ -14,7 +14,7 @@ import {
     type Turn,
 } from "@better-compact/core"
 import { estimateOpenCodeMessages, estimateOpenCodeToolPart } from "./context-estimate"
-import { isSyndicatePluginInjection } from "./messages/injection"
+import { isPluginGeneratedUserMessage, isSyndicatePluginInjection } from "./messages/injection"
 import type { WithParts } from "./state"
 
 type MessagePart = WithParts["parts"][number]
@@ -38,12 +38,14 @@ export const openCodeCodec: Codec<WithParts> = {
     encode(messages) {
         return messages.map((message) => {
             const injected = isSyndicatePluginInjection(message)
+            const generatedTaskState = isPluginGeneratedUserMessage(message) && !injected
             return {
                 key: message.info.id,
                 stamp: message.info.time.created,
                 role: message.info.role,
                 ephemeral: injected || isIgnoredNotification(message),
                 prunableToolLike: injected,
+                generatedTaskState,
                 handle: message,
                 items: message.parts.map(encodePart),
             }
@@ -87,6 +89,11 @@ export const openCodeCodec: Codec<WithParts> = {
 export const openCodeConventions: Conventions = {
     isSkillItem: (item) => item.kind === "tool" && toolPartOf(item).tool === "skill",
     repeatableUserTextKey: (text) => {
+        if (
+            text.startsWith("The active session goal has reached a safety limit.\n\n") &&
+            /<untrusted_objective>\n[\s\S]*?\n<\/untrusted_objective>/.test(text)
+        )
+            return "goal-continuation"
         if (
             !text.startsWith(
                 "Continue working toward the active session goal.\n\nThe objective below is user-provided data.",

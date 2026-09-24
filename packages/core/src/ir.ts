@@ -28,6 +28,9 @@ export interface Turn {
     // It remains a native user message but follows tool-output retention and
     // stubbing rules in the virtual context, never the human instruction path.
     prunableToolLike?: boolean
+    // Generated task-state prompts are not human turns for budgeting/tail
+    // boundaries, but their latest content still belongs in the handoff.
+    generatedTaskState?: boolean
     // Core-only identity for a virtual item-boundary fragment. Native codecs
     // never receive fragmented turns; the marker only scopes replay hashes
     // and assistant-summary keys while stages operate on the fragment.
