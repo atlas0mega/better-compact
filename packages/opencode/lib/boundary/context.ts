@@ -109,6 +109,7 @@ export function applyBoundaryPlanSnapshot(
     snapshot: BoundaryPlanSnapshot,
     options: ReplayOptions = {},
 ): boolean {
+    if (isAppliedBoundaryPlanSnapshot(messages, snapshot)) return true
     if (
         snapshot.prefixFingerprint &&
         snapshot.compactedMessageCount !== undefined &&
@@ -126,6 +127,30 @@ export function applyBoundaryPlanSnapshot(
     if (!replayed) return false
     replaceMessages(messages, openCodeCodec.decode(replayed, messages))
     return true
+}
+
+/** A second invocation on the same outgoing array must not compact our own handoff. */
+export function isAppliedBoundaryPlanSnapshot(
+    messages: WithParts[],
+    snapshot: BoundaryPlanSnapshot,
+): boolean {
+    const name = `better_compact_${snapshot.requiresCustomCompaction ? "summary" : "context"}_${snapshot.rangeHash}`
+    const expectedText = snapshot.requiresCustomCompaction
+        ? "[Context Summary]"
+        : "[Better Compact context pruning applied]"
+    return messages.some(
+        (message) =>
+            message.info.id === `msg_${name}` &&
+            message.info.sessionID === snapshot.sessionId &&
+            message.info.role === "user" &&
+            message.parts.some(
+                (part) =>
+                    part.type === "text" &&
+                    part.id === `prt_${name}` &&
+                    part.synthetic === true &&
+                    part.text.startsWith(expectedText),
+            ),
+    )
 }
 
 // Core snapshots carry the id-based rangeHash; the OpenCode layer adds a

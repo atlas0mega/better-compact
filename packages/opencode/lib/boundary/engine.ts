@@ -15,7 +15,12 @@ import { saveSessionState, type SessionState, type WithParts } from "../state"
 import { boundaryRangeHash } from "./fingerprint"
 import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore } from "./transcripts"
-import { adaptiveTailUserTurns, efficientAgenticTailBudget } from "./context"
+import {
+    adaptiveTailUserTurns,
+    applyBoundaryPlanSnapshot,
+    efficientAgenticTailBudget,
+    isAppliedBoundaryPlanSnapshot,
+} from "./context"
 import {
     archiveBoundaryDelta,
     archiveOversizedSummary,
@@ -60,6 +65,10 @@ export async function processBoundaryTransform(input: {
 }): Promise<BoundaryContextPlan | null> {
     let prefixChunkAttempted = false
     const oldPlan = input.state.boundary.activePlan
+    if (oldPlan && isAppliedBoundaryPlanSnapshot(input.messages, oldPlan)) {
+        input.onOutcome?.("replayed")
+        return null
+    }
     const changedArchivedPrefix =
         !!oldPlan?.prefixFingerprint &&
         oldPlan.compactedMessageCount !== undefined &&
@@ -141,6 +150,54 @@ export async function processBoundaryTransform(input: {
         },
     }
     const profile = resolveCompactionProfile(input.config)
+    const contextLimit = input.state.modelContextLimit ?? 0
+    const triggerTokens =
+        input.config.compaction.triggerTokens ??
+        Math.floor((contextLimit * profile.triggerPercent) / 100)
+    const targetTokens =
+        input.config.compaction.targetTokens ??
+        Math.floor((contextLimit * profile.targetPercent) / 100)
+    const oldTailIndex = oldPlan
+        ? input.messages.findIndex((message) => message.info.id === oldPlan.rawTailStartMessageId)
+        : -1
+    const migratePluginInjections =
+        !!oldPlan &&
+        oldPlan.pluginInjectionPruning !== true &&
+        oldTailIndex > 0 &&
+        input.messages.slice(0, oldTailIndex).some(isSyndicatePluginInjection)
+    const migrateUnboundedPrefix =
+        !!oldPlan?.requiresCustomCompaction &&
+        oldPlan.afterPruneTokens > oldPlan.targetTokens &&
+        !currentPrefixAttempt &&
+        (oldPlan.prefixSummary?.match(/^- Resume from prior assistant progress: /gm)?.length ??
+            0) >= 12 &&
+        profile.prefixSummary &&
+        input.summariesAllowed !== false &&
+        !!input.summarizePrefix
+    // A background archive description/checkpoint can change the catalog while
+    // the provider is still well below the next compaction threshold. Reuse
+    // the already-applied boundary; only a fresh threshold crossing, explicit
+    // overflow, changed policy or invalidated source can replace its context.
+    if (
+        oldPlan &&
+        contextLimit > 0 &&
+        !input.forceOverflow &&
+        (input.providerReportedTokens ?? 0) < triggerTokens &&
+        !changedArchivedPrefix &&
+        !migratePluginInjections &&
+        !migrateUnboundedPrefix &&
+        oldPlan.contextLimit === contextLimit &&
+        oldPlan.triggerTokens === triggerTokens &&
+        oldPlan.targetTokens === targetTokens &&
+        oldPlan.recentReasoningBudgetTokens === profile.recentReasoningTokens &&
+        oldPlan.recentAssistantOutputs === 5 &&
+        oldPlan.prefixSummaryAllowed === profile.prefixSummary &&
+        oldPlan.collapsePercent === profile.collapsePercent &&
+        applyBoundaryPlanSnapshot(input.messages, oldPlan, { allowRegrown: true })
+    ) {
+        input.onOutcome?.("replayed")
+        return null
+    }
     if (
         oldPlan &&
         catalog.checkpoint &&
@@ -202,23 +259,6 @@ export async function processBoundaryTransform(input: {
             migrationRetirement = eligibleMigrationRetirement
         }
     }
-    const oldTailIndex = oldPlan
-        ? input.messages.findIndex((message) => message.info.id === oldPlan.rawTailStartMessageId)
-        : -1
-    const migratePluginInjections =
-        !!oldPlan &&
-        oldPlan.pluginInjectionPruning !== true &&
-        oldTailIndex > 0 &&
-        input.messages.slice(0, oldTailIndex).some(isSyndicatePluginInjection)
-    const migrateUnboundedPrefix =
-        !!oldPlan?.requiresCustomCompaction &&
-        oldPlan.afterPruneTokens > oldPlan.targetTokens &&
-        !currentPrefixAttempt &&
-        (oldPlan.prefixSummary?.match(/^- Resume from prior assistant progress: /gm)?.length ??
-            0) >= 12 &&
-        profile.prefixSummary &&
-        input.summariesAllowed !== false &&
-        !!input.summarizePrefix
     const minTailUserTurns = adaptiveTailUserTurns(
         input.messages,
         input.state.modelContextLimit ?? 1,

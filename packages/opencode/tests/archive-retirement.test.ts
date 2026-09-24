@@ -7,6 +7,7 @@ import type { PluginConfig } from "../lib/config"
 import { Logger } from "../lib/logger"
 import { createSessionState, type WithParts } from "../lib/state"
 import { processBoundaryTransform, retainArchivedUserText } from "../lib/boundary/engine"
+import { applyBoundaryPlanSnapshot } from "../lib/boundary/context"
 import { openCodeCodec } from "../lib/codec"
 import {
     loadArchiveCatalog,
@@ -337,6 +338,115 @@ test("an older catalog checkpoint alone cannot retire first-boundary wording", a
     })
     assert.deepEqual(replay, migrated)
     assert.equal((await loadArchiveCatalog(directory, sessionId)).entries.length, 1)
+})
+
+test("a ready archive cannot silently compact an existing plan again below the provider trigger", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "bc-once-below-trigger-"))
+    const logger = new Logger(false)
+    const state = createSessionState(sessionId)
+    state.modelContextLimit = 20_000
+    const settings = config()
+    settings.compaction.custom!.triggerPercent = 70
+    settings.compaction.custom!.targetPercent = 25
+    const original = [
+        message(
+            "once-old-user",
+            "user",
+            `Keep original wording: ${"important detail ".repeat(300)}`,
+            1,
+        ),
+        ...Array.from({ length: 12 }, (_, index) =>
+            message(
+                `once-old-work-${index}`,
+                "assistant",
+                `Earlier implementation ${index}: ${"evidence ".repeat(1_000)}`,
+                index + 2,
+            ),
+        ),
+        message("once-middle-user", "user", "Continue with the parser tests.", 20),
+        message("once-middle-work", "assistant", "Checked src/parser.ts.", 21),
+        message("once-current-user", "user", "Apply the current policy.", 22),
+    ]
+    const first = structuredClone(original)
+    const initial = await processBoundaryTransform({
+        state,
+        providerReportedTokens: 9_000,
+        forceOverflow: true,
+        logger,
+        config: settings,
+        directory,
+        messages: first,
+        summariesAllowed: false,
+    })
+    assert.ok(initial)
+    assert.ok(state.boundary.activePlan)
+    const saved = structuredClone(state.boundary.activePlan)
+    const catalog = await loadArchiveCatalog(directory, sessionId)
+    assert.equal(catalog.entries.length, 1)
+    catalog.entries[0].status = "ready"
+    catalog.entries[0].description = "Original wording and parser implementation archived."
+    catalog.checkpoint = [
+        "## Decisions",
+        "- Preserve the current policy.",
+        "## Files & Symbols",
+        "- src/parser.ts",
+        "## Errors (verbatim)",
+        "- (none)",
+        "## What failed and why",
+        "- (none)",
+        "## Constraints",
+        "- Original wording is available in the archive.",
+        "## Next step",
+        "- Check parser tests.",
+    ].join("\n")
+    catalog.validatedCheckpointId = catalog.entries[0].id
+    await saveArchiveCatalog(directory, catalog)
+
+    const newer = [
+        message("once-new-work", "assistant", "One more check.", 23),
+        message("once-new-user", "user", "Keep going.", 24),
+        message("once-next-work", "assistant", "Checked one more file.", 25),
+    ]
+    for (let added = 1; added <= newer.length; added++) {
+        const advanced = [...structuredClone(original), ...structuredClone(newer.slice(0, added))]
+        const expected = structuredClone(advanced)
+        assert.ok(applyBoundaryPlanSnapshot(expected, saved, { allowRegrown: true }))
+        let outcome: string | undefined
+        const next = await processBoundaryTransform({
+            state,
+            providerReportedTokens: 9_000 + added * 100,
+            logger,
+            config: settings,
+            directory,
+            messages: advanced,
+            summariesAllowed: false,
+            onOutcome: (value) => {
+                outcome = value
+            },
+        })
+        assert.equal(next, null)
+        assert.equal(outcome, "replayed")
+        assert.deepEqual(advanced, expected)
+        assert.deepEqual(state.boundary.activePlan, saved)
+        const alreadyApplied = structuredClone(advanced)
+        assert.ok(applyBoundaryPlanSnapshot(advanced, saved, { allowRegrown: true }))
+        assert.deepEqual(advanced, alreadyApplied)
+        const again = await processBoundaryTransform({
+            state,
+            providerReportedTokens: 9_000 + added * 100,
+            logger,
+            config: settings,
+            directory,
+            messages: advanced,
+            summariesAllowed: false,
+        })
+        assert.equal(again, null)
+        assert.deepEqual(advanced, alreadyApplied, "the same outgoing context is transformed once")
+        assert.deepEqual(state.boundary.activePlan, saved)
+    }
+    const afterReplay = await loadArchiveCatalog(directory, sessionId)
+    assert.equal(afterReplay.entries.length, 1)
+    assert.equal(afterReplay.retirementThrough, undefined)
 })
 
 test("round two retires only described older wording and keeps the newly archived correction", async () => {

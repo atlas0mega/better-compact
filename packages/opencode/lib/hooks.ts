@@ -1022,6 +1022,8 @@ async function runBetterCompact(input: {
     }
 
     const previousActivePlan = input.state.boundary.activePlan
+    const previousPlannedUsage = input.state.boundary.lastPlannedUsageMessageId
+    const previousIdleUsage = input.state.boundary.lastIdleUsageMessageId
     let liveHandoffCalls = 0
     try {
         let catalog = await expireArchives(input.workingDirectory, input.sessionId)
@@ -1595,6 +1597,11 @@ async function runBetterCompact(input: {
             )
         setBoundaryStage(input.state, "report", "completed", "Final report published")
         completeBoundaryJob(input.state, "Complete")
+        const usageMessageId = getCurrentUsageMessageId(input.state, input.messages)
+        if (usageMessageId) {
+            input.state.boundary.lastPlannedUsageMessageId = usageMessageId
+            input.state.boundary.lastIdleUsageMessageId = usageMessageId
+        }
         await saveSessionState(input.state, input.logger)
         scheduleArchiveDescriptions({
             client: input.client,
@@ -1613,6 +1620,8 @@ async function runBetterCompact(input: {
         })
     } catch (error) {
         input.state.boundary.activePlan = previousActivePlan
+        input.state.boundary.lastPlannedUsageMessageId = previousPlannedUsage
+        input.state.boundary.lastIdleUsageMessageId = previousIdleUsage
         const message = safeCompactionFailure(error)
         appendBoundaryLog(input.state, `Failed: ${message}`)
         failBoundaryJob(input.state, message)

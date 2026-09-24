@@ -1504,6 +1504,64 @@ test("manual request during a busy turn waits until idle and runs once", async (
     assert.equal(reports.length, 1)
 })
 
+test("manual compaction consumes its provider reading so idle cannot compact it again", async () => {
+    const sessionID = `ses-manual-once-${Date.now()}`
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 40_000)
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-manual-once-"))
+    const config = buildConfig("allow")
+    config.compaction.preset = "custom"
+    config.compaction.custom = {
+        triggerPercent: 70,
+        targetPercent: 25,
+        recentToolTokens: 0,
+        summarizerConcurrency: 1,
+        prefixSummary: false,
+        collapsePercent: 45,
+    }
+    const client = {
+        session: {
+            status: async () => ({ data: { [sessionID]: { type: "idle" } } }),
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+            prompt: async () => ({ data: true }),
+        },
+        provider: {
+            list: async () => [
+                {
+                    id: "anthropic",
+                    models: { "claude-test": { limit: { context: 50_000 } } },
+                },
+            ],
+        },
+        tui: { showToast: async () => ({}) },
+    }
+    const logger = new Logger(false)
+    const runtime = createRuntimeState(client, logger)
+    const state = runtime.get(sessionID)
+    state.modelContextLimit = 50_000
+    await createCommandExecuteHandler(
+        client,
+        runtime,
+        logger,
+        config,
+        directory,
+        { global: undefined, agents: {} },
+    )({ command: "better-compact", sessionID, arguments: "compress" }, { parts: [] })
+    await runtime.activeCompaction(sessionID)
+    assert.ok(state.boundary.activePlan)
+    assert.equal(state.boundary.lastPlannedUsageMessageId, "assistant-2")
+    assert.equal(state.boundary.lastIdleUsageMessageId, "assistant-2")
+
+    const saved = structuredClone(state.boundary.activePlan)
+    await finishAutoTurn(client, runtime, config, directory, messages, sessionID)
+    assert.deepEqual(state.boundary.activePlan, saved)
+    assert.equal(state.boundary.automaticCheck, undefined)
+    const outgoing = { messages: structuredClone(messages) }
+    await transformHandler(client, runtime, config, directory)({}, outgoing)
+    assert.deepEqual(state.boundary.activePlan, saved)
+    assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
+})
+
 test("the report no-reply prompt uses the observed chat variant without guessing from session.get", async () => {
     let prompt: any
     const client = {
