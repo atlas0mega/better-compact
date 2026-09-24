@@ -478,6 +478,61 @@ test("a stale saved plan is rebuilt before an overflowing request rather than si
     assert.notEqual(runtime.get(sessionID).boundary.automaticCheck?.reason, "plan_replayed")
 })
 
+test("a revised archived result below trigger cannot send unpruned history or churn later prefixes", async () => {
+    const sessionID = `ses-stale-below-trigger-${Date.now()}`
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
+    const client = transformClient(100_000)
+    const runtime = createRuntimeState(client, new Logger(false))
+    const config = buildConfig("allow")
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-stale-below-trigger-"))
+    await finishAutoTurn(client, runtime, config, directory, messages, sessionID)
+    const state = runtime.get(sessionID)
+    const originalPlan = state.boundary.activePlan
+    assert.ok(originalPlan)
+
+    const revised = structuredClone(messages)
+    const oldTool = revised[1].parts[0] as any
+    oldTool.state.output = `Revised completed tool output ${oldTool.state.output}`
+    const lastAssistant = revised.findLast((item) => item.info.role === "assistant")!
+    lastAssistant.info.tokens!.total = 3_300
+    lastAssistant.info.tokens!.input = 3_299
+    const handler = transformHandler(client, runtime, config, directory)
+    const outgoing = { messages: structuredClone(revised) }
+    await handler({}, outgoing)
+    assert.ok(
+        outgoing.messages.some((item) => item.info.id.startsWith("msg_better_compact_")),
+        "an invalid old plan must not expose the raw archived prefix below trigger",
+    )
+    assert.notEqual(state.boundary.activePlan?.prefixFingerprint, originalPlan.prefixFingerprint)
+    const stable = structuredClone(outgoing.messages)
+    const next = { messages: structuredClone(revised) }
+    await handler({}, next)
+    assert.deepEqual(next.messages, stable, "consecutive provider-bound prefixes must match")
+    assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
+})
+
+test("a non-replayable saved plan cannot silently pass raw history when no new boundary fits", async () => {
+    const sessionID = `ses-invalid-no-boundary-${Date.now()}`
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
+    const client = transformClient(100_000)
+    const runtime = createRuntimeState(client, new Logger(false))
+    const config = buildConfig("allow")
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-invalid-no-boundary-"))
+    await finishAutoTurn(client, runtime, config, directory, messages, sessionID)
+    assert.ok(runtime.get(sessionID).boundary.activePlan)
+
+    const revised = structuredClone(messages)
+    revised.splice(0, revised.length - 2)
+    const lastAssistant = revised[0]
+    lastAssistant.info.tokens!.total = 3_300
+    lastAssistant.info.tokens!.input = 3_299
+    await assert.rejects(
+        transformHandler(client, runtime, config, directory)({}, { messages: revised }),
+        /could not restore its saved context/,
+    )
+    assert.equal(runtime.get(sessionID).boundary.automaticCheck?.reason, "replay_invalid")
+})
+
 test("an irreducible oversized user turn stops the provider request", async () => {
     const sessionID = `ses-irreducible-${Date.now()}`
     const messages = [

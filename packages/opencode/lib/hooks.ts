@@ -353,6 +353,7 @@ export function createChatMessageTransformHandler(
             currentConfig.compaction.targetTokens ??
             Math.floor((contextLimit * profile.targetPercent) / 100)
         const cached = state.boundary.activePlan
+        const invalidCachedReplay = !!cached && !replayed
         const policyChanged =
             !!cached &&
             (cached.contextLimit !== contextLimit ||
@@ -370,7 +371,8 @@ export function createChatMessageTransformHandler(
             // Provider usage is the ordinary trigger. A request estimated to
             // exceed the model window or a stale-policy plan must be settled
             // before the next provider request, without lowering the trigger.
-            (policyChanged ||
+            (invalidCachedReplay ||
+                policyChanged ||
                 (providerTokens >= triggerTokens &&
                     usageMessageId !== state.boundary.lastPlannedUsageMessageId) ||
                 outgoingEstimate >= contextLimit)
@@ -398,11 +400,31 @@ export function createChatMessageTransformHandler(
                 messages,
                 params: currentParams,
                 forceOverflow: outgoingEstimate >= contextLimit,
+                forceInvalidReplay: invalidCachedReplay,
             })
             if (outcome === "engine_error" && originalMessages && state.boundary.activePlan)
                 applyBoundaryPlanSnapshot(messages, state.boundary.activePlan, {
                     allowRegrown: true,
                 })
+            if (
+                invalidCachedReplay &&
+                (!state.boundary.activePlan ||
+                    !applyBoundaryPlanSnapshot(messages, state.boundary.activePlan, {
+                        allowRegrown: true,
+                    }))
+            ) {
+                await recordAutomaticCheck(
+                    state,
+                    logger,
+                    "replay_invalid",
+                    messages,
+                    currentConfig,
+                    openCodeCodec.estimateTurns(openCodeCodec.encode(messages)),
+                )
+                throw new Error(
+                    "Better Compact could not restore its saved context after the session history changed; the provider request was stopped.",
+                )
+            }
             const finalEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
             if (finalEstimate >= contextLimit) {
                 await recordAutomaticCheck(
@@ -447,6 +469,7 @@ async function runAutomaticTransform(input: {
     messages: WithParts[]
     params: ReturnType<typeof getCurrentParams>
     forceOverflow?: boolean
+    forceInvalidReplay?: boolean
 }): Promise<string> {
     try {
         const usageMessageId = getCurrentUsageMessageId(input.state, input.messages)
@@ -462,6 +485,7 @@ async function runAutomaticTransform(input: {
                 messages: input.messages,
                 providerReportedTokens: getCurrentTokenUsage(input.state, input.messages),
                 forceOverflow: input.forceOverflow,
+                forceInvalidReplay: input.forceInvalidReplay,
                 onOutcome: (outcome) => {
                     replayed = outcome === "replayed"
                 },

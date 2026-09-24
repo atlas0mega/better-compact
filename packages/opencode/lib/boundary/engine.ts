@@ -50,6 +50,7 @@ export async function processBoundaryTransform(input: {
     messages: WithParts[]
     providerReportedTokens?: number
     forceOverflow?: boolean
+    forceInvalidReplay?: boolean
     onOutcome?: (outcome: "planned" | "replayed" | "unchanged") => void
     summariesAllowed?: boolean
     summarize?: (jobs: BoundarySummaryJob[]) => Promise<Record<string, string>>
@@ -405,6 +406,7 @@ export async function processBoundaryTransform(input: {
                   },
         force:
             input.forceOverflow === true ||
+            input.forceInvalidReplay === true ||
             migrationHandoff !== undefined ||
             changedArchivedPrefix ||
             migratePluginInjections ||
@@ -417,6 +419,7 @@ export async function processBoundaryTransform(input: {
                             ((input.state.modelContextLimit ?? 0) * profile.triggerPercent) / 100,
                         ))),
         reuseStablePrefixOnForce:
+            !input.forceInvalidReplay &&
             !changedArchivedPrefix &&
             !migratePluginInjections &&
             !migrateUnboundedPrefix &&
