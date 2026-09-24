@@ -168,17 +168,14 @@ agent loop continues, or on `session.idle` when the turn terminates. An
 unchanged queuing prompt alone does not activate it.
 
 In OpenCode's archive workflow, deterministic pruning comes first. The
-25% target in the current live configuration is best-effort. Above 115% of that
-target, a newly advanced boundary may request a Luna-written handoff; **no
-deterministic whole-prefix fallback** runs if it fails. A handoff replaces
-older turns only when it validates and makes the complete outgoing context
-smaller than keeping the exact cheap-pruned turns it would replace. Existing
-validated state stays in live context on a cheap-only pass. OpenCode protects
-the last **2–5** real assistant text outputs with all intervening reasoning
-that fits alongside a provider-window buffer, excluding tool calls. If even
-two outputs and their full reasoning span cannot fit, it keeps the outputs
-with one bounded reasoning allowance: at least 20k when possible, up to the
-configured 28k fallback. This is not an additional reasoning reserve.
+25% target in the current live configuration is best-effort: a new last-resort
+prefix starts only above 115% of the target. It retains the newest complete
+pruned turns natively in available projected context, counting protected
+reasoning, tools, the handoff, raw tail, and overhead together. OpenCode also
+anchors its last five real assistant text outputs with the reasoning between
+them, excluding tool calls. A provider-window buffer reserves room for the
+next response; if that reasoning interval cannot fit, the outputs remain
+native and reasoning falls back to its 28k allowance, with the limit reported.
 A previously applied prefix remains stable on replay. The
 Luna/high **live handoff** runs synchronously before the next provider request
 only when the resulting plan exceeds 115% of the target. It may use at most
@@ -193,8 +190,7 @@ context limit minus a bounded output reserve (24k tokens on large models) and it
 own prompt overhead. If exact archived payloads are too large, the summarizer
 receives pruned evidence while the private archive retains the exact originals.
 No historical chunk is silently dropped. A failed or non-reducing live handoff
-retains cheap-pruned native context, any prior validated checkpoint, and the
-private archive for later recall. Once a
+retains the deterministic handoff and private archive for later recall. Once a
 live handoff validates and makes the **complete** outgoing context smaller, it
 replaces the covered old wording before the next provider call. Background
 descriptions make pending archives ready without changing the active cached plan.

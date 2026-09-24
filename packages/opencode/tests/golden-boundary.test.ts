@@ -442,14 +442,14 @@ const scenarios: Scenario[] = [
         },
     },
     {
-        name: "prefix-summary-without-validated-handoff",
+        name: "prefix-summary-custom-compaction",
         messages: multiRunConversation,
         options: { contextLimit: 500, recentToolResultBudgetTokens: 0 },
         replays: [{ name: "identical" }],
         expect: (plan) => {
             assert.ok(plan)
-            assert.equal(plan.requiresCustomCompaction, false)
-            assert.ok(!plan.stages.some((stage) => stage.name === "prefix-summary"))
+            assert.equal(plan.requiresCustomCompaction, true)
+            assert.ok(plan.stages.some((stage) => stage.name === "prefix-summary"))
         },
     },
     {

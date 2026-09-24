@@ -132,9 +132,6 @@ export function applyBoundaryPlanSnapshot(
     snapshot: BoundaryPlanSnapshot,
     options: ReplayOptions = {},
 ): boolean {
-    // A pre-migration OpenCode snapshot may contain the removed deterministic
-    // prefix. Do not replay it on the first request after a plugin restart.
-    if (snapshot.preservePrefixBudgets === true && snapshot.modelOnlyPrefix !== true) return false
     if (
         snapshot.prefixFingerprint &&
         snapshot.compactedMessageCount !== undefined &&

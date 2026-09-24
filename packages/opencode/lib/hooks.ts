@@ -357,7 +357,6 @@ export function createChatMessageTransformHandler(
         const policyChanged =
             !!cached &&
             (cached.contextLimit !== contextLimit ||
-                cached.modelOnlyPrefix !== true ||
                 cached.triggerTokens !== triggerTokens ||
                 cached.targetTokens !== targetTokens ||
                 cached.recentReasoningBudgetTokens !== profile.recentReasoningTokens ||
@@ -1072,10 +1071,6 @@ async function runBetterCompact(input: {
             providerHistoryTokens,
             summariesAllowed,
             archiveCatalogText: liveArchiveDescriptions(catalog),
-            validatedCheckpoint:
-                catalog.validatedCheckpointId && catalog.checkpoint
-                    ? catalog.checkpoint
-                    : undefined,
             archiveGeneration: catalog.entries.length,
             retirementThrough: catalog.retirementThrough,
             priorPlan: input.state.boundary.activePlan ?? undefined,
@@ -1132,10 +1127,6 @@ async function runBetterCompact(input: {
         catalog = archived.catalog
         plan.archiveGeneration = catalog.entries.length
         plan.archiveCatalogText = liveArchiveDescriptions(catalog)
-        plan.validatedCheckpoint =
-            catalog.validatedCheckpointId && catalog.checkpoint
-                ? catalog.checkpoint
-                : undefined
         updateBoundaryCounters(input.state, { archivedMessages: plan.transcript.messageIds.length })
         setBoundaryStage(
             input.state,
@@ -1261,7 +1252,6 @@ async function runBetterCompact(input: {
                         input.messages,
                     ),
                     archiveCatalogText: liveArchiveDescriptions(candidate),
-                    validatedCheckpoint: result.handoff,
                     archiveGeneration: candidate.entries.length,
                     retirementThrough: candidate.retirementThrough,
                     triggerRatio: profile.triggerPercent / 100,
@@ -1330,7 +1320,7 @@ async function runBetterCompact(input: {
                 "prefix-summary",
                 finalPlan === plan ? "failed" : "completed",
                 finalPlan === plan
-                    ? "Kept cheap-pruned context and prior validated handoff"
+                    ? "Kept safe deterministic handoff"
                     : `Applied archive handoff: ${formatCompactTokens(plan.afterPruneTokens)} -> ${formatCompactTokens(finalPlan.afterPruneTokens)}`,
             )
             await saveProgress()
@@ -1506,7 +1496,7 @@ async function runBetterCompact(input: {
                 input.state,
                 summaryStage,
                 "completed",
-                `${appliedSummaries}/${activeJobs.length} summaries applied (${Object.keys(assistantSummaries).length} valid; ${input.state.boundary.job?.counters.summaryJobsDone ?? 0} attempted; remaining turns keep pruned previews)`,
+                `${appliedSummaries}/${activeJobs.length} summaries applied (${Object.keys(assistantSummaries).length} valid; ${input.state.boundary.job?.counters.summaryJobsDone ?? 0} attempted; remaining turns use deterministic fallback)`,
             )
             updateBoundaryCounters(input.state, {
                 currentTokens: finalPlan.afterPruneTokens,

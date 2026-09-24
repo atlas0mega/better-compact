@@ -436,57 +436,128 @@ test("sparse user turns advance the raw boundary without splitting or losing mes
     assert.deepEqual(repeated, messages)
 })
 
-test("an older deterministic OpenCode prefix cannot replay after the model-only migration", async () => {
+test("an older deterministic prefix gets one bounded synthesis attempt below trigger", async () => {
     const messages = [
         message("user-old", "user", [textPart("user-old", "Keep this original requirement")], 1),
-        ...Array.from({ length: 12 }, (_, index) =>
+        ...Array.from({ length: 20 }, (_, index) =>
             message(
                 `assistant-${index}`,
                 "assistant",
-                [textPart(`assistant-${index}`, `Finished step ${index}: ${"implementation detail ".repeat(90)}`)],
+                [
+                    textPart(
+                        `assistant-${index}`,
+                        `Finished step ${index}: ${"implementation detail ".repeat(40)}`,
+                    ),
+                ],
                 index + 2,
             ),
         ),
-        message("user-current", "user", [textPart("user-current", "Current task")], 20),
+        message("user-middle", "user", [textPart("user-middle", "Continue")], 25),
+        message(
+            "assistant-tail",
+            "assistant",
+            [textPart("assistant-tail", "Most recent work")],
+            26,
+        ),
+        message("user-current", "user", [textPart("user-current", "Current task")], 27),
     ]
-    const fresh = buildBoundaryContextPlan(messages, {
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-old-prefix-"))
+    const config = getConfig({ directory, worktree: directory, client: {} } as never, {
+        warnings: false,
+    })
+    config.compaction.preset = "custom"
+    config.compaction.custom = {
+        ...config.compaction.custom,
+        triggerPercent: 85,
+        targetPercent: 22,
+        prefixSummary: true,
+    }
+    config.compaction.triggerTokens = 175_000
+    config.compaction.targetTokens = 1_000
+    const minTailUserTurns = adaptiveTailUserTurns(messages, 200_000, 22, 1_000)
+    const oldPlan = buildBoundaryContextPlan(messages, {
         contextLimit: 200_000,
         force: true,
+        triggerTokens: 175_000,
         targetTokens: 1_000,
-        minTailUserTurns: 1,
+        minTailUserTurns,
         prefixSummaryAllowed: true,
     })
-    assert.ok(fresh)
-    assert.equal(fresh.requiresCustomCompaction, false)
-    const old = {
-        ...toBoundaryPlanSnapshot(fresh, messages),
-        modelOnlyPrefix: undefined,
+    assert.ok(oldPlan)
+    const oldPrefix = formatPrefixSummary(openCodeCodec.encode(messages.slice(0, -1)))
+    assert.ok((oldPrefix.match(/^- Resume from prior assistant progress: /gm)?.length ?? 0) >= 12)
+    const oldSnapshot = {
+        ...toBoundaryPlanSnapshot(oldPlan, messages),
         requiresCustomCompaction: true,
-        prefixSummary: formatPrefixSummary(openCodeCodec.encode(messages.slice(0, -1))),
+        prefixSummary: oldPrefix,
+        afterPruneTokens: 5_000,
+        prefixChunkAttempted: true as const,
+        prefixChunkVersion: 1,
     }
-    const replay = structuredClone(messages)
-    assert.equal(applyBoundaryPlanSnapshot(replay, old, { allowRegrown: true }), false)
-    assert.deepEqual(replay, messages)
-
-    const directory = mkdtempSync(join(tmpdir(), "better-compact-old-prefix-"))
     const state = createSessionState()
     state.sessionId = sessionID
     state.modelContextLimit = 200_000
-    state.boundary.activePlan = old
-    const config = getConfig({ directory, worktree: directory, client: {} } as never, { warnings: false })
-    config.compaction.preset = "custom"
-    config.compaction.custom = { ...config.compaction.custom, prefixSummary: true }
-    const transformed = structuredClone(messages)
+    state.boundary.activePlan = oldSnapshot
+    const logger = new Logger(false)
+    let calls = 0
+    const first = structuredClone(messages)
+    assert.ok(
+        await processBoundaryTransform({
+            state,
+            logger,
+            config,
+            directory,
+            messages: first,
+            summariesAllowed: true,
+            summarizePrefix: async () => {
+                calls++
+                return null
+            },
+        }),
+    )
+    assert.equal(calls, 1)
+    assert.equal(state.boundary.activePlan?.prefixChunkAttempted, true)
+    assert.equal(state.boundary.activePlan?.prefixChunkVersion, 2)
+    const replay = structuredClone(messages)
+    assert.equal(
+        await processBoundaryTransform({
+            state,
+            logger,
+            config,
+            directory,
+            messages: replay,
+            summariesAllowed: true,
+            summarizePrefix: async () => {
+                calls++
+                return null
+            },
+        }),
+        null,
+    )
+    assert.equal(calls, 1)
+    assert.deepEqual(replay, first)
+    // The same oversized saved range may be retried if its summary model changes.
+    state.boundary.activePlan = {
+        ...oldSnapshot,
+        prefixChunkVersion: 2,
+        prefixChunkModel: "inherit",
+    }
+    config.compaction.summaryModel = "openai/gpt-6-luna"
+    const changedModel = structuredClone(messages)
     await processBoundaryTransform({
         state,
-        logger: new Logger(false),
+        logger,
         config,
         directory,
-        messages: transformed,
-        summariesAllowed: false,
+        messages: changedModel,
+        summariesAllowed: true,
+        summarizePrefix: async () => {
+            calls++
+            return null
+        },
     })
-    assert.notEqual(state.boundary.activePlan?.requiresCustomCompaction, true)
-    assert.match(JSON.stringify(transformed), /Keep this original requirement/)
+    assert.equal(calls, 2)
+    assert.equal(state.boundary.activePlan?.prefixChunkModel, "openai/gpt-6-luna")
 })
 
 test("prefix summary keeps only the latest goal continuation even when objectives change", async () => {
@@ -512,36 +583,43 @@ test("prefix summary keeps only the latest goal continuation even when objective
     ]
 
     const plan = buildBoundaryContextPlan(messages, { contextLimit: 500, force: true })
-    assert.ok(plan)
-    assert.equal(plan.requiresCustomCompaction, false)
-    assert.equal(plan.prefixSummary, undefined)
+    assert.ok(plan?.requiresCustomCompaction)
+    assert.ok(plan.prefixSummary?.includes(latest))
+    assert.ok(!plan.prefixSummary?.includes(first))
+    assert.ok(!plan.prefixSummary?.includes(second))
+    assert.ok(!plan.prefixSummary?.includes(different))
+    assert.ok(plan.prefixSummary?.includes("Please keep this instruction exactly."))
     assert.deepEqual(plan.transcript.messageIds.slice(0, 3), ["u-1", "a-1", "u-2"])
 
-    // A prior deterministic summary is not validated current-task state.
+    // A previous version's stored plan may still contain every continuation.
     const oldSummary = formatPrefixSummary(openCodeCodec.encode(messages.slice(0, 10)))
     assert.ok(
         oldSummary.includes(first) && oldSummary.includes(second) && oldSummary.includes(different),
     )
-    const legacySnapshot = {
-        ...toBoundaryPlanSnapshot(plan, messages),
-        modelOnlyPrefix: undefined,
-        requiresCustomCompaction: true,
-        prefixSummary: oldSummary,
-    }
+    const legacySnapshot = { ...toBoundaryPlanSnapshot(plan, messages), prefixSummary: oldSummary }
     const replacement = buildBoundaryContextPlan(messages, {
         contextLimit: 500,
         force: true,
         priorPlan: legacySnapshot,
     })
-    assert.ok(replacement)
-    assert.equal(replacement.requiresCustomCompaction, false)
-    assert.equal(replacement.prefixSummary, undefined)
+    assert.ok(replacement?.prefixSummary?.includes(latest))
+    assert.ok(!replacement.prefixSummary.includes(first))
+    assert.ok(!replacement.prefixSummary.includes(second))
+    assert.ok(!replacement.prefixSummary.includes(different))
+    assert.ok(replacement.prefixSummary.includes("Please keep this instruction exactly."))
 
     const replayed = structuredClone(messages)
-    assert.equal(applyBoundaryPlanSnapshot(replayed, legacySnapshot, { allowRegrown: true }), false)
-    assert.deepEqual(replayed, messages)
+    assert.ok(applyBoundaryPlanSnapshot(replayed, legacySnapshot, { allowRegrown: true }))
+    const replayedSummary = replayed.find((item) =>
+        item.info.id.startsWith("msg_better_compact_summary_"),
+    )
+    const replayedText = replayedSummary?.parts.find((part) => part.type === "text")?.text
+    assert.ok(replayedText?.includes(latest))
+    assert.ok(!replayedText.includes(first))
+    assert.ok(!replayedText.includes(second))
+    assert.ok(!replayedText.includes(different))
 
-    // The engine must invalidate that cached prefix even below its old trigger.
+    // An eligible cached plan also persists the cleaned summary on replay.
     const cached = { ...legacySnapshot, triggerTokens: 100_000 }
     let saved: PlanSnapshot | null = null
     const engine = createEngine(openCodeSpec, {
@@ -562,10 +640,13 @@ test("prefix summary keeps only the latest goal continuation even when objective
         preservePrefixBudgets: true,
         recentAssistantOutputs: 5,
     })
-    assert.notEqual(result.outcome, "replayed")
-    assert.equal(saved, null)
+    assert.equal(result.outcome, "replayed")
+    assert.ok(saved?.prefixSummary?.includes(latest))
+    assert.ok(!saved.prefixSummary.includes(first))
+    assert.ok(!saved.prefixSummary.includes(second))
+    assert.ok(!saved.prefixSummary.includes(different))
 
-    // The standalone legacy formatter still avoids repeating generated goal prompts.
+    // If a still newer copy is in the protected raw tail, the prefix keeps none.
     const prefix = openCodeCodec.encode(messages.slice(0, 10))
     const rawTail = openCodeCodec.encode([
         message("u-tail", "user", [textPart("u-tail", goalContinuation("final goal", 100))], 14),
@@ -620,7 +701,7 @@ test("split plans omit whole-message fork identity", () => {
     assert.equal(snapshot.compactedMessageCount, undefined)
 })
 
-test("a validated OpenCode handoff retains selected native reasoning and tools through replay", () => {
+test("OpenCode's last-resort handoff retains selected native reasoning and tools through replay", () => {
     const messages: WithParts[] = []
     for (let index = 0; index < 5; index++) {
         const user = `reason-user-${index}`
@@ -674,7 +755,6 @@ test("a validated OpenCode handoff retains selected native reasoning and tools t
         recentReasoningBudgetTokens: 2_000,
         recentToolResultBudgetTokens: 2_000,
         archiveCatalogText: "- c000001-123456789abc — Current task history",
-        prefixSummary: "## Decisions\n- Follow instructions.\n## Constraints\n- Preserve recent reasoning and tools.\n## Next step\n- Continue the task.",
     })
     assert.ok(plan?.requiresCustomCompaction)
     assert.equal(plan.reasoningSurvivesPrefix, true)

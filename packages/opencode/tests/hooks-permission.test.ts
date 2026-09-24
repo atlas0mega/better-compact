@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import type { PluginConfig } from "../lib/config"
 import { archiveBoundaryDelta, loadArchiveCatalog } from "../lib/boundary/archive-catalog"
 import { openCodeCodec } from "../lib/codec"
-import { applyBoundaryPlanSnapshot, buildBoundaryContextPlan, processBoundaryTransform } from "../lib/boundary"
+import { buildBoundaryContextPlan, processBoundaryTransform } from "../lib/boundary"
 import {
     createChatMessageHandler,
     createChatMessageTransformHandler,
@@ -658,7 +658,7 @@ test("auto transform path honors the configured compaction profile", async () =>
     )
 })
 
-test("automatic compaction honors the assistant collapse cap without a deterministic prefix", async () => {
+test("automatic compaction honors the prefix-summary opt-in and assistant collapse cap", async () => {
     const plans = [] as NonNullable<ReturnType<RuntimeState["get"]>["boundary"]["activePlan"]>[]
     for (const [prefixSummary, collapsePercent] of [
         [false, 10],
@@ -685,12 +685,11 @@ test("automatic compaction honors the assistant collapse cap without a determini
     assert.ok(!plans[0].stages.some((stage) => stage.name === "prefix-summary"))
     assert.equal(plans[0].assistantSummaryKeys?.length, 1)
     assert.ok((plans[1].assistantSummaryKeys?.length ?? 0) > 1)
-    assert.ok(!plans[2].stages.some((stage) => stage.name === "prefix-summary"))
-    assert.equal(plans[2].requiresCustomCompaction, false)
-    assert.ok((plans[2].assistantSummaryKeys?.length ?? 0) > 0, "non-prefix replay needs its turn cache")
+    assert.ok(plans[2].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[2].assistantSummaryKeys?.length, 0, "prefix absorbs the per-turn cache")
 })
 
-test("manual compaction honors the assistant collapse cap without a deterministic prefix", async () => {
+test("manual compaction honors the prefix-summary opt-in and assistant collapse cap", async () => {
     const plans = [] as NonNullable<ReturnType<RuntimeState["get"]>["boundary"]["activePlan"]>[]
     for (const [prefixSummary, collapsePercent] of [
         [false, 10],
@@ -725,9 +724,8 @@ test("manual compaction honors the assistant collapse cap without a deterministi
     assert.ok(!plans[0].stages.some((stage) => stage.name === "prefix-summary"))
     assert.equal(plans[0].assistantSummaryKeys?.length, 1)
     assert.ok((plans[1].assistantSummaryKeys?.length ?? 0) > 1)
-    assert.ok(!plans[2].stages.some((stage) => stage.name === "prefix-summary"))
-    assert.equal(plans[2].requiresCustomCompaction, false)
-    assert.ok((plans[2].assistantSummaryKeys?.length ?? 0) > 0, "non-prefix replay needs its turn cache")
+    assert.ok(plans[2].stages.some((stage) => stage.name === "prefix-summary"))
+    assert.equal(plans[2].assistantSummaryKeys?.length, 0, "prefix absorbs the per-turn cache")
 })
 
 test("manual TUI archive handoff uses its default variant independent of turn-summary effort", async () => {
@@ -928,7 +926,7 @@ test("manual compaction avoids paying for per-turn summaries it cannot apply", a
     assert.ok(baseline.afterPruneTokens > 0)
 })
 
-test("manual compaction retains cheap-pruned context when the whole handoff is too large", async () => {
+test("manual prefix compaction keeps the fallback when the whole handoff is too large", async () => {
     const sessionId = `ses-prefix-chunks-${Date.now()}`
     const messages = buildProfileEscalationConversation(sessionId)
     const config = profileEscalationConfig(true, 45)
@@ -1059,12 +1057,11 @@ test("manual compaction retains cheap-pruned context when the whole handoff is t
     await waitFor(() => state.boundary.job?.status === "completed")
     assert.ok(prompts >= 1 && prompts <= 7)
     assert.equal(state.boundary.job?.counters.summaryJobsDone, livePrompts)
-    assert.equal(state.boundary.activePlan?.requiresCustomCompaction, false)
-    assert.equal(state.boundary.activePlan?.prefixSummary, undefined)
-    const outgoing = structuredClone(messages)
-    assert.ok(applyBoundaryPlanSnapshot(outgoing, state.boundary.activePlan!, { allowRegrown: true }))
-    assert.match(JSON.stringify(outgoing), /Important instruction/)
-    assert.doesNotMatch(JSON.stringify(outgoing), /Verbose historical progress/)
+    assert.match(state.boundary.activePlan?.prefixSummary ?? "", /Important instruction/)
+    assert.doesNotMatch(
+        state.boundary.activePlan?.prefixSummary ?? "",
+        /Validate the latest implementation/,
+    )
     const catalog = await loadArchiveCatalog(directory, sessionId)
     assert.ok(["pending", "ready"].includes(catalog.entries.at(-1)?.status ?? ""))
     assert.ok(catalog.entries.at(-1)?.oversizedSummaryPath)
@@ -1213,33 +1210,6 @@ test("changing the target below trigger retires a stale overcompact plan without
     assert.deepEqual(output.messages, messages)
     assert.equal(state.boundary.automaticCheck?.reason, "below_trigger")
     assert.equal((await loadArchiveCatalog(directory, sessionID)).entries.length, archiveCount)
-})
-
-test("pre-request migration refuses an old deterministic prefix even below the unchanged trigger", async () => {
-    const sessionID = `ses-prefix-migration-${process.pid}-${Date.now()}`
-    const config = buildConfig("allow")
-    const client = transformClient(100_000)
-    const runtime = createRuntimeState(client, new Logger(false))
-    const state = runtime.get(sessionID)
-    const directory = mkdtempSync(join(tmpdir(), "better-compact-prefix-migration-"))
-    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
-    await finishAutoTurn(client, runtime, config, directory, messages, sessionID)
-    assert.ok(state.boundary.activePlan)
-    const archives = (await loadArchiveCatalog(directory, sessionID)).entries.length
-    state.boundary.activePlan = {
-        ...state.boundary.activePlan,
-        modelOnlyPrefix: undefined,
-        requiresCustomCompaction: true,
-        prefixSummary: "Unvalidated old deterministic prefix",
-    }
-    withProviderUsage(messages, 3_000)
-    const output = { messages: structuredClone(messages) }
-    await transformHandler(client, runtime, config, directory)({}, output)
-
-    assert.equal(state.boundary.activePlan, null)
-    assert.deepEqual(output.messages, messages)
-    assert.doesNotMatch(JSON.stringify(output.messages), /Unvalidated old deterministic prefix/)
-    assert.equal((await loadArchiveCatalog(directory, sessionID)).entries.length, archives)
 })
 
 test("automatic compaction triggers from provider usage when the local estimate is lower", async () => {

@@ -18,7 +18,6 @@ export interface StageContext {
     rawTailStartIndex: number
     transcriptRelativePath: string
     archiveCatalogText?: string
-    validatedCheckpoint?: string
     preservedToolCallIds: ReadonlySet<string>
     protectRecentTools?: boolean
     preservedReasoningItemKeys: ReadonlySet<string>

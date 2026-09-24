@@ -4,18 +4,11 @@
 
 **Current user corrections (supersede conflicting older wording below):** OpenCode
 automatic compaction stays enabled; the live target is **25%**, best effort, and
-new model-written prefix synthesis starts only beyond **115% of target**.
-**Remove the deterministic whole-prefix fallback** in OpenCode: accept a
-validated Luna handoff only when it reduces the complete context relative to
-the cheap-pruned native content it replaces; on failure keep that context
-and any prior validated checkpoint even above target. The current configured
-fallback reasoning allowance is **28k tokens**. Protect **2–5** last real
-assistant text outputs with their intervening reasoning (not tool calls),
-leaving a provider-window buffer. Prefer the largest complete group that fits;
-if even two outputs and full reasoning do not fit, keep the two outputs and
-use **one** bounded reasoning allowance, with a 20k minimum when feasible
-(not 20k plus the protected span). Report when the minimum cannot fit.
-Do not pad context to the target. Keep original user wording live through
+a new last-resort prefix starts only beyond **115% of target**. The fallback
+reasoning allowance is **28k tokens**. Protect the last five real assistant
+text outputs with their intervening reasoning (not tool calls), leaving a
+provider-window buffer; if the span cannot fit, keep the outputs, bound the
+reasoning, and report the shortfall. Keep original user wording live through
 first archival; only older described deltas may retire at a later boundary with
 a validated current-intent handoff. Keep automatic seven-day archive expiry.
 
