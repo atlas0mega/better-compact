@@ -17,6 +17,7 @@ import {
     formatBoundaryReport,
     appendBoundaryLog,
     applyBoundaryPlanSnapshot,
+    upgradeBoundaryPlanFingerprint,
     completeBoundaryJob,
     failBoundaryJob,
     processBoundaryTransform,
@@ -341,6 +342,17 @@ export function createChatMessageTransformHandler(
             replayed = applyBoundaryPlanSnapshot(messages, state.boundary.activePlan, {
                 allowRegrown: true,
             })
+            if (replayed && originalMessages) {
+                const previous = state.boundary.activePlan
+                const upgraded = upgradeBoundaryPlanFingerprint(originalMessages, previous)
+                if (upgraded) {
+                    state.boundary.activePlan = upgraded
+                    await saveSessionState(state, logger).catch(() => {
+                        if (state.boundary.activePlan === upgraded)
+                            state.boundary.activePlan = previous
+                    })
+                }
+            }
         }
         const providerTokens = getCurrentTokenUsage(state, originalMessages ?? messages)
         const usageMessageId = getCurrentUsageMessageId(state, originalMessages ?? messages)

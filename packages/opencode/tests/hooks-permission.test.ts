@@ -557,6 +557,12 @@ test("accounting updates in an archived turn reuse the same provider-bound prefi
     await handler({}, legacy)
     assert.deepEqual(modelContent(legacy.messages), modelContent(original.messages))
     assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
+    assert.equal(state.boundary.activePlan?.prefixFingerprintVersion, 2)
+    assert.equal(state.boundary.activePlan?.prefixFingerprint, saved.prefixFingerprint)
+    const afterUpgrade = { messages: structuredClone(updated) }
+    await handler({}, afterUpgrade)
+    assert.deepEqual(modelContent(afterUpgrade.messages), modelContent(original.messages))
+    assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
 })
 
 test("a non-replayable saved plan cannot silently pass raw history when no new boundary fits", async () => {

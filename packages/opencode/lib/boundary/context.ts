@@ -129,6 +129,27 @@ export function applyBoundaryPlanSnapshot(
     return true
 }
 
+/** Upgrade a validated legacy plan in place without rebuilding the provider prefix. */
+export function upgradeBoundaryPlanFingerprint(
+    messages: WithParts[],
+    snapshot: BoundaryPlanSnapshot,
+): BoundaryPlanSnapshot | null {
+    if (
+        snapshot.prefixFingerprintVersion === 2 ||
+        !snapshot.prefixFingerprint ||
+        !snapshot.compactedMessageCount ||
+        snapshot.compactedMessageCount > messages.length
+    )
+        return null
+    const prefix = messages.slice(0, snapshot.compactedMessageCount)
+    if (boundarySnapshotHash(prefix, snapshot) !== snapshot.prefixFingerprint) return null
+    return {
+        ...snapshot,
+        prefixFingerprintVersion: PREFIX_FINGERPRINT_VERSION,
+        prefixFingerprint: boundaryRangeHash(prefix),
+    }
+}
+
 /** A second invocation on the same outgoing array must not compact our own handoff. */
 export function isAppliedBoundaryPlanSnapshot(
     messages: WithParts[],
