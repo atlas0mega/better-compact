@@ -20,7 +20,7 @@ import {
     type SessionState,
     type WithParts,
 } from "../state"
-import { boundaryRangeHash } from "./fingerprint"
+import { boundaryRangeHash, boundarySnapshotHash, PREFIX_FINGERPRINT_VERSION } from "./fingerprint"
 import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore, transcriptCitablePath } from "./transcripts"
 import { inheritArchiveCatalog } from "./archive-catalog"
@@ -114,7 +114,7 @@ export function applyBoundaryPlanSnapshot(
         snapshot.prefixFingerprint &&
         snapshot.compactedMessageCount !== undefined &&
         (snapshot.compactedMessageCount > messages.length ||
-            boundaryRangeHash(messages.slice(0, snapshot.compactedMessageCount)) !==
+            boundarySnapshotHash(messages.slice(0, snapshot.compactedMessageCount), snapshot) !==
                 snapshot.prefixFingerprint)
     )
         return false
@@ -169,6 +169,7 @@ export function toBoundaryPlanSnapshot(
     const prefix = messages.slice(0, plan.rawTailStartIndex)
     return {
         ...snapshot,
+        prefixFingerprintVersion: PREFIX_FINGERPRINT_VERSION,
         prefixFingerprint: boundaryRangeHash(prefix),
         compactedMessageCount: prefix.length,
     }
@@ -200,15 +201,16 @@ export async function findMatchingBoundaryPlan(
     const forkTitle = await resolveTitle(sessionId).catch(() => undefined)
     if (!forkTitle || !/ \(fork #\d+\)$/.test(forkTitle)) return null
     const plans = await loadPersistedBoundaryPlans(logger)
-    const hashes = new Map<number, string>()
+    const hashes = new Map<string, string>()
     for (const plan of plans) {
         if (plan.rawTailItemBoundary !== undefined) continue
         const compactedCount = plan.compactedMessageCount
         if (!plan.prefixFingerprint || !compactedCount || compactedCount >= messages.length)
             continue
+        const key = `${compactedCount}:${plan.prefixFingerprintVersion ?? 1}`
         const hash =
-            hashes.get(compactedCount) ?? boundaryRangeHash(messages.slice(0, compactedCount))
-        hashes.set(compactedCount, hash)
+            hashes.get(key) ?? boundarySnapshotHash(messages.slice(0, compactedCount), plan)
+        hashes.set(key, hash)
         if (hash !== plan.prefixFingerprint) continue
         const ownerTitle = await resolveTitle(plan.sessionId).catch(() => undefined)
         if (!ownerTitle || forkTitleOf(ownerTitle) !== forkTitle) continue

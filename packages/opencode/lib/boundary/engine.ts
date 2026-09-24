@@ -12,7 +12,7 @@ import type { PluginConfig } from "../config"
 import type { Logger } from "../logger"
 import { openCodeCodec, openCodeConventions, openCodeSpec, sessionKeyOf } from "../codec"
 import { saveSessionState, type SessionState, type WithParts } from "../state"
-import { boundaryRangeHash } from "./fingerprint"
+import { boundaryRangeHash, boundarySnapshotHash, PREFIX_FINGERPRINT_VERSION } from "./fingerprint"
 import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore } from "./transcripts"
 import {
@@ -74,8 +74,10 @@ export async function processBoundaryTransform(input: {
         !!oldPlan?.prefixFingerprint &&
         oldPlan.compactedMessageCount !== undefined &&
         (oldPlan.compactedMessageCount > input.messages.length ||
-            boundaryRangeHash(input.messages.slice(0, oldPlan.compactedMessageCount)) !==
-                oldPlan.prefixFingerprint)
+            boundarySnapshotHash(
+                input.messages.slice(0, oldPlan.compactedMessageCount),
+                oldPlan,
+            ) !== oldPlan.prefixFingerprint)
     let catalog = await expireArchives(input.directory, input.state.sessionId ?? "unknown-session")
     let newArchiveEntry = false
     const validatedEntry = catalog.validatedCheckpointId
@@ -489,6 +491,7 @@ function stampForkIdentity(snapshot: PlanSnapshot, messages: WithParts[]) {
     const prefix = messages.slice(0, tailIndex)
     return {
         ...tagged,
+        prefixFingerprintVersion: PREFIX_FINGERPRINT_VERSION,
         prefixFingerprint: boundaryRangeHash(prefix),
         compactedMessageCount: prefix.length,
     }

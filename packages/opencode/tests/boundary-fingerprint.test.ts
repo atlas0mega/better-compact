@@ -45,3 +45,37 @@ test("boundary fingerprint retains semantic payload fields named id", () => {
 
     assert.notEqual(boundaryRangeHash([first]), boundaryRangeHash([second]))
 })
+
+test("prefix identity ignores usage and completion metadata but detects actual source revisions", () => {
+    const original = toolMessage("message", "session", "customer-a")
+    const accounting = structuredClone(original)
+    Object.assign(accounting.info, {
+        cost: 3,
+        tokens: { total: 32_000, input: 30_000, output: 2_000, reasoning: 5_000 },
+        finish: "stop",
+        time: { created: 1, completed: 10 },
+    })
+    Object.assign(accounting.parts[0], { time: { start: 1, end: 10 } })
+    const state = (accounting.parts[0] as any).state
+    state.time = { start: 2, end: 10 }
+    assert.equal(boundaryRangeHash([original]), boundaryRangeHash([accounting]))
+
+    state.output = "new result"
+    assert.notEqual(boundaryRangeHash([original]), boundaryRangeHash([accounting]))
+})
+
+test("reasoning timing cannot invalidate the prefix, but reasoning content still can", () => {
+    const original = toolMessage("message", "session", "customer-a")
+    original.parts.push({
+        id: "reasoning-part",
+        messageID: original.info.id,
+        sessionID: original.info.sessionID,
+        type: "reasoning",
+        text: "Important conclusion",
+    } as WithParts["parts"][number])
+    const updated = structuredClone(original)
+    Object.assign(updated.parts[1], { time: { start: 3, end: 6 } })
+    assert.equal(boundaryRangeHash([original]), boundaryRangeHash([updated]))
+    Object.assign(updated.parts[1], { text: "Different conclusion" })
+    assert.notEqual(boundaryRangeHash([original]), boundaryRangeHash([updated]))
+})

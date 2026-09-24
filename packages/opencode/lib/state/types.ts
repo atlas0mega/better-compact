@@ -55,6 +55,8 @@ export interface BoundaryJobProgress {
 // content) can inherit a matching plan.
 export interface BoundaryPlanSnapshot extends PlanSnapshot {
     prefixFingerprint?: string
+    /** Absent for the pre-semantic fingerprint; keep old plans replayable. */
+    prefixFingerprintVersion?: 2
     compactedMessageCount?: number
     // Absent in snapshots created before generated plugin prompts were
     // classified as tool-like. Used to replan older affected sessions once.

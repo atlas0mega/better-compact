@@ -1057,7 +1057,8 @@
         }
       ],
       "createdAt": 0,
-      "prefixFingerprint": "b29e96d5a0483f23",
+      "prefixFingerprintVersion": 2,
+      "prefixFingerprint": "337e9dd7150ca790",
       "compactedMessageCount": 2
     },
     "replays": {
@@ -2291,7 +2292,8 @@
         }
       ],
       "createdAt": 0,
-      "prefixFingerprint": "b29e96d5a0483f23",
+      "prefixFingerprintVersion": 2,
+      "prefixFingerprint": "337e9dd7150ca790",
       "compactedMessageCount": 2
     },
     "replays": {
@@ -3171,7 +3173,8 @@
         }
       ],
       "createdAt": 0,
-      "prefixFingerprint": "54a34a21da0d28b0",
+      "prefixFingerprintVersion": 2,
+      "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
     },
     "replays": {
@@ -5190,7 +5193,8 @@
         }
       ],
       "createdAt": 0,
-      "prefixFingerprint": "54a34a21da0d28b0",
+      "prefixFingerprintVersion": 2,
+      "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
     },
     "replays": {
@@ -6070,7 +6074,8 @@
         }
       ],
       "createdAt": 0,
-      "prefixFingerprint": "54a34a21da0d28b0",
+      "prefixFingerprintVersion": 2,
+      "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
     },
     "replays": {
@@ -6995,7 +7000,8 @@
         }
       ],
       "createdAt": 0,
-      "prefixFingerprint": "54a34a21da0d28b0",
+      "prefixFingerprintVersion": 2,
+      "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
     },
     "replays": {
@@ -7941,7 +7947,8 @@
         }
       ],
       "createdAt": 0,
-      "prefixFingerprint": "54a34a21da0d28b0",
+      "prefixFingerprintVersion": 2,
+      "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
     },
     "replays": {
@@ -8882,7 +8889,8 @@
         }
       ],
       "createdAt": 0,
-      "prefixFingerprint": "76fbb97096d2f61b",
+      "prefixFingerprintVersion": 2,
+      "prefixFingerprint": "3de8cd6fe3f115c5",
       "compactedMessageCount": 4
     },
     "replays": {

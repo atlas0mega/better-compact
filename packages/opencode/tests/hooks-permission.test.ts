@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { PluginConfig } from "../lib/config"
 import { archiveBoundaryDelta, loadArchiveCatalog } from "../lib/boundary/archive-catalog"
+import { boundaryRangeHash } from "../lib/boundary/fingerprint"
 import { openCodeCodec } from "../lib/codec"
 import { buildBoundaryContextPlan, processBoundaryTransform } from "../lib/boundary"
 import {
@@ -508,6 +509,53 @@ test("a revised archived result below trigger cannot send unpruned history or ch
     const next = { messages: structuredClone(revised) }
     await handler({}, next)
     assert.deepEqual(next.messages, stable, "consecutive provider-bound prefixes must match")
+    assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
+})
+
+test("accounting updates in an archived turn reuse the same provider-bound prefix", async () => {
+    const sessionID = `ses-accounting-replay-${Date.now()}`
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
+    const client = transformClient(100_000)
+    const runtime = createRuntimeState(client, new Logger(false))
+    const config = buildConfig("allow")
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-accounting-replay-"))
+    await finishAutoTurn(client, runtime, config, directory, messages, sessionID)
+    const state = runtime.get(sessionID)
+    const saved = structuredClone(state.boundary.activePlan)
+    assert.equal(saved?.prefixFingerprintVersion, 2)
+
+    const handler = transformHandler(client, runtime, config, directory)
+    const original = { messages: structuredClone(messages) }
+    await handler({}, original)
+    const updated = structuredClone(messages)
+    Object.assign(updated[1].info, {
+        cost: 5,
+        finish: "stop",
+        time: { ...updated[1].info.time, completed: 20 },
+        tokens: { total: 3_300, input: 3_000, output: 300, reasoning: 0 },
+    })
+    const revised = { messages: updated }
+    await handler({}, revised)
+    const modelContent = (items: WithParts[]) =>
+        items.map((item) => ({ id: item.info.id, role: item.info.role, parts: item.parts }))
+    assert.deepEqual(modelContent(revised.messages), modelContent(original.messages))
+    assert.deepEqual(state.boundary.activePlan, saved)
+    assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
+
+    // Plans already on disk use the original full-message fingerprint. Loading
+    // the new plugin must not force a one-time re-compaction of every session.
+    assert.ok(saved?.compactedMessageCount)
+    state.boundary.activePlan = {
+        ...saved,
+        prefixFingerprintVersion: undefined,
+        prefixFingerprint: boundaryRangeHash(
+            messages.slice(0, saved.compactedMessageCount),
+            1,
+        ),
+    }
+    const legacy = { messages: structuredClone(messages) }
+    await handler({}, legacy)
+    assert.deepEqual(modelContent(legacy.messages), modelContent(original.messages))
     assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
 })
 
