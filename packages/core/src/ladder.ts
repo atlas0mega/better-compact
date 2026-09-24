@@ -173,7 +173,7 @@ export function buildPlan(
         spec.conventions,
         inputs.preservePrefixBudgets === true,
     )
-    const anchored = inputs.recentAssistantOutputs
+    const selectedConversation = inputs.recentAssistantOutputs
         ? selectAnchoredConversation(
               turns,
               compactedRange,
@@ -186,6 +186,10 @@ export function buildPlan(
               spec.codec,
           )
         : undefined
+    // An assistant/tool loop can contain reasoning before it produces any
+    // visible text. In that case keep the configured recent-reasoning budget
+    // instead of treating an empty output anchor as a zero-token allowance.
+    const anchored = selectedConversation?.outputCount ? selectedConversation : undefined
     applyPreservationFloor(
         preservedToolCallIds,
         priorBoundary ? partitionTurns(turns, priorBoundary).compactedRange : [],
@@ -203,6 +207,7 @@ export function buildPlan(
         rawTailStartIndex: partition.rawTailStartIndex,
         transcriptRelativePath,
         archiveCatalogText: inputs.archiveCatalogText ?? prior?.archiveCatalogText,
+        validatedCheckpoint: inputs.validatedCheckpoint,
         preservedToolCallIds,
         protectRecentTools: inputs.preservePrefixBudgets,
         preservedReasoningItemKeys: anchored?.reasoningKeys ?? new Set<string>(),
@@ -267,24 +272,33 @@ export function buildPlan(
 
     let requiresCustomCompaction = false
     let preservedPrefixTurnKeys: string[] = []
-    let prefixSummary =
-        inputs.prefixSummary ??
-        rolledPrefixSummary ??
-        (expandedPrefix ? undefined : priorPrefixSummary)
+    // A compacted OpenCode prefix must have an explicit model-written handoff.
+    // The old deterministic fallback is not evidence of current intent.
+    const modelOnlyPrefix = inputs.preservePrefixBudgets === true
+    let prefixSummary = modelOnlyPrefix
+        ? inputs.prefixSummary
+        : (inputs.prefixSummary ??
+          rolledPrefixSummary ??
+          (expandedPrefix ? undefined : priorPrefixSummary))
     // The target is best-effort. Within 15% of it, do not replace an entire
     // older prefix merely to shave the last few tokens. A previously applied
     // prefix still carries historical state and must remain monotonic.
     if (
         prefixSummaryAllowed &&
-        (projectedTokens() > Math.floor(targetTokens * 1.15) ||
-            prior?.requiresCustomCompaction ||
-            inputs.prefixSummary !== undefined)
+        (modelOnlyPrefix
+            ? !!inputs.prefixSummary?.trim() &&
+              (projectedTokens() > Math.floor(targetTokens * 1.15) ||
+                  (prior?.requiresCustomCompaction && prior.modelOnlyPrefix))
+            : projectedTokens() > Math.floor(targetTokens * 1.15) ||
+              prior?.requiresCustomCompaction ||
+              inputs.prefixSummary !== undefined)
     ) {
         const newlyCompactedTurns =
             expandedPrefix && priorBoundary
                 ? turnsBetweenBoundaries(turns, priorBoundary, boundary)
                 : []
         if (
+            !modelOnlyPrefix &&
             expandedPrefix &&
             priorPrefixSummary &&
             inputs.prefixSummary === undefined &&
@@ -300,6 +314,7 @@ export function buildPlan(
                 prefixSummary = dedupeRepeatableUserTextInSummary(extended, turns, spec.conventions)
         }
         if (
+            !modelOnlyPrefix &&
             ctx.summariesAllowed !== false &&
             prefixSummaryJobKey &&
             priorPrefixSummary &&
@@ -372,15 +387,17 @@ export function buildPlan(
                 ? currentTailStartIndex
                 : partition.rawTailStartIndex
             const previouslyNative = new Set(prior?.preservedPrefixTurnKeys ?? [])
-            // Earlier native prefix turns are a continuity floor until a new,
-            // validated handoff can retire the archive cohort containing them.
-            // Carrying them unconditionally after that point forces a valid
-            // replacement to coexist with its own source and can make the
-            // *complete* outgoing context larger rather than smaller.
+            // Native turns from the previous checkpoint are a continuity floor
+            // only until a *new* model-written handoff replaces them. OpenCode
+            // carries unretired user wording verbatim inside that handoff; the
+            // exact native turns also remain in the private delta. Keeping
+            // their entire old output alongside every successive handoff
+            // would accumulate needless live tokens indefinitely.
             const retirePreviousNative =
                 inputs.prefixSummary !== undefined &&
-                inputs.retirementThrough !== undefined &&
-                inputs.retirementThrough > (prior?.retirementThrough ?? 0)
+                (modelOnlyPrefix ||
+                    (inputs.retirementThrough !== undefined &&
+                        inputs.retirementThrough > (prior?.retirementThrough ?? 0)))
             for (const candidate of source.slice(0, prefixEnd)) {
                 if (!previouslyNative.has(candidate.key) || retirePreviousNative) continue
                 preservedPrefixTurnKeys.push(candidate.key)
@@ -419,7 +436,13 @@ export function buildPlan(
             clearedTokens: Math.max(0, beforePrefix - afterPrefix),
             changedMessages: result.changedTurns.size,
             changedParts: result.changedItems,
-            status: afterPrefix <= targetTokens ? "applied" : "failed",
+            status: modelOnlyPrefix
+                ? result.changedTurns.size > 0
+                    ? "applied"
+                    : "skipped"
+                : afterPrefix <= targetTokens
+                  ? "applied"
+                  : "failed",
         })
     }
 
@@ -469,6 +492,8 @@ export function buildPlan(
             ? { protectedAssistantItemKeys: [...anchored.textKeys] }
             : {}),
         ...(anchored?.limited ? { anchorReasoningLimited: true } : {}),
+        ...(anchored?.floorUnmet ? { anchorReasoningFloorUnmet: true } : {}),
+        ...(anchored?.outputCount ? { anchoredOutputCount: anchored.outputCount } : {}),
         assistantSurvivesPrefix:
             !!inputs.preservePrefixBudgets &&
             requiresCustomCompaction &&
@@ -480,6 +505,7 @@ export function buildPlan(
         ...(preservedPrefixTurnKeys.length > 0 ? { preservedPrefixTurnKeys } : {}),
         recentReasoningBudgetTokens: inputs.recentReasoningBudgetTokens,
         preservePrefixBudgets: inputs.preservePrefixBudgets,
+        ...(modelOnlyPrefix ? { modelOnlyPrefix: true as const } : {}),
         transcript: {
             relativePath: transcriptRelativePath,
             content: "",
@@ -494,6 +520,7 @@ export function buildPlan(
         assistantSummaries: requiresCustomCompaction ? {} : ctx.assistantSummaries,
         prefixSummary,
         archiveCatalogText: inputs.archiveCatalogText ?? prior?.archiveCatalogText,
+        validatedCheckpoint: inputs.validatedCheckpoint,
         archiveGeneration: inputs.archiveGeneration ?? prior?.archiveGeneration,
         retirementThrough: inputs.retirementThrough ?? prior?.retirementThrough,
     }
@@ -563,6 +590,7 @@ export function transformTurns(
         rawTailStartIndex: partition.rawTailStartIndex,
         transcriptRelativePath: plan.transcript.relativePath,
         archiveCatalogText: plan.archiveCatalogText,
+        validatedCheckpoint: plan.validatedCheckpoint,
         preservedToolCallIds: new Set(plan.preservedToolCallIds),
         protectRecentTools: plan.preservePrefixBudgets,
         preservedReasoningItemKeys: new Set(plan.preservedReasoningItemKeys ?? []),
@@ -583,6 +611,8 @@ export function transformTurns(
         if (stageNames.has(stage.name)) stage.run(working, ctx)
     }
     if (plan.requiresCustomCompaction) {
+        if (plan.modelOnlyPrefix && !plan.prefixSummary?.trim())
+            throw new Error("OpenCode prefix replacement requires a validated handoff")
         const preserved = preservedPrefixTurns(
             working.slice(0, partition.rawTailStartIndex),
             plan.reasoningSurvivesPrefix
@@ -642,6 +672,8 @@ export function replayPlanSnapshot(
 ): Turn[] | null {
     const boundary = resolveTailBoundary(turns, snapshot)
     if (!boundary || !matchesPlanSnapshot(turns, snapshot)) return null
+    if (snapshot.modelOnlyPrefix && snapshot.requiresCustomCompaction && !snapshot.prefixSummary?.trim())
+        return null
     const rawTailStartIndex = boundary.turnIndex
     const overheadTokens = snapshot.overheadTokens ?? 0
     const prefixSummary = snapshot.prefixSummary
@@ -671,10 +703,13 @@ export function replayPlanSnapshot(
             assistantSurvivesPrefix: snapshot.assistantSurvivesPrefix,
             recentAssistantOutputs: snapshot.recentAssistantOutputs,
             anchorReasoningLimited: snapshot.anchorReasoningLimited,
+            anchorReasoningFloorUnmet: snapshot.anchorReasoningFloorUnmet,
+            anchoredOutputCount: snapshot.anchoredOutputCount,
             reasoningSurvivesPrefix: snapshot.reasoningSurvivesPrefix,
             preservedPrefixTurnKeys: snapshot.preservedPrefixTurnKeys,
             recentReasoningBudgetTokens: snapshot.recentReasoningBudgetTokens,
             preservePrefixBudgets: snapshot.preservePrefixBudgets,
+            modelOnlyPrefix: snapshot.modelOnlyPrefix,
             assistantSummaryKeys:
                 snapshot.assistantSummaryKeys ?? Object.keys(snapshot.assistantSummaries ?? {}),
             transcript: {
@@ -687,6 +722,7 @@ export function replayPlanSnapshot(
             assistantSummaries: snapshot.assistantSummaries ?? {},
             prefixSummary,
             archiveCatalogText: snapshot.archiveCatalogText,
+            validatedCheckpoint: snapshot.validatedCheckpoint,
             archiveGeneration: snapshot.archiveGeneration,
             retirementThrough: snapshot.retirementThrough,
         },
@@ -736,6 +772,7 @@ export interface Engine {
         prefixSummaryAllowed?: boolean
         collapsePercent?: number
         archiveCatalogText?: string
+        validatedCheckpoint?: string
         archiveGeneration?: number
         retirementThrough?: number
         prefixSummary?: string
@@ -757,6 +794,8 @@ export interface Engine {
         ) => Promise<
             | {
                   handoff: string
+                  /** The catalog's validated handoff before literal-user-wording augmentation. */
+                  checkpoint?: string
                   catalogText: string
                   retirementThrough?: number
                   commit(): Promise<void>
@@ -791,6 +830,7 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             prefixSummaryAllowed,
             collapsePercent,
             archiveCatalogText,
+            validatedCheckpoint,
             archiveGeneration,
             retirementThrough,
             prefixSummary,
@@ -830,6 +870,8 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                     cached.prefixSummaryAllowed === prefixSummaryAllowed &&
                     cached.collapsePercent === collapsePercent &&
                     cached.archiveCatalogText === archiveCatalogText &&
+                    cached.validatedCheckpoint === validatedCheckpoint &&
+                    cached.modelOnlyPrefix === (preservePrefixBudgets === true ? true : undefined) &&
                     cached.archiveGeneration === archiveGeneration &&
                     cached.retirementThrough === retirementThrough &&
                     cached.recentReasoningBudgetTokens === recentReasoningBudgetTokens &&
@@ -867,6 +909,7 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                 prefixSummaryAllowed,
                 collapsePercent,
                 archiveCatalogText,
+                validatedCheckpoint,
                 archiveGeneration,
                 retirementThrough,
                 prefixSummary,
@@ -910,9 +953,12 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             let prefixAttempted = false
             if (
                 (summarizeArchive || summarizePrefix) &&
-                plan.requiresCustomCompaction &&
+                (preservePrefixBudgets === true
+                    ? prefixSummaryAllowed !== false
+                    : plan.requiresCustomCompaction) &&
                 plan.afterPruneTokens > Math.floor(plan.targetTokens * 1.15)
             ) {
+                prefixAttempted = true
                 try {
                     const proposal = summarizeArchive
                         ? await summarizeArchive(plan, turns)
@@ -920,7 +966,6 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                     const replacement = summarizeArchive
                         ? proposal?.handoff
                         : await summarizePrefix!(plan, turns)
-                    prefixAttempted = replacement !== undefined
                     if (replacement) {
                         const rebuilt = buildPlan(
                             turns,
@@ -928,6 +973,8 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                                 ...inputs,
                                 priorPlan: toPlanSnapshot(plan),
                                 prefixSummary: replacement,
+                                validatedCheckpoint:
+                                    proposal?.checkpoint ?? inputs.validatedCheckpoint,
                                 archiveCatalogText:
                                     proposal?.catalogText ?? inputs.archiveCatalogText,
                                 retirementThrough:
@@ -948,7 +995,7 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                 } catch (error) {
                     prefixAttempted = true
                     ports.logger.warn(
-                        "Chunked prefix summary failed; retaining deterministic plan",
+                        "Chunked prefix summary failed; retaining cheap-pruned plan",
                         {
                             sessionId: sessionKey,
                             error: "summary_failure",
@@ -1272,8 +1319,7 @@ function selectAnchoredConversation(
     fallbackReasoningBudget: number,
     protectedTools: ReadonlySet<string>,
     codec: CodecOps,
-): { textKeys: Set<string>; reasoningKeys: Set<string>; limited: boolean } {
-    const textKeys = new Set<string>()
+): { textKeys: Set<string>; reasoningKeys: Set<string>; limited: boolean; floorUnmet: boolean; outputCount: number } {
     const reasoningKeys = new Set<string>()
     const selected: number[] = []
     for (let index = turns.length - 1; index >= 0 && selected.length < outputCount; index--) {
@@ -1283,28 +1329,10 @@ function selectAnchoredConversation(
             turn.items.some((item) => item.kind === "text" && item.text.trim().length > 0)
         ) selected.unshift(index)
     }
-    if (!selected.length) return { textKeys, reasoningKeys, limited: false }
+    if (!selected.length) return { textKeys: new Set(), reasoningKeys, limited: false, floorUnmet: false, outputCount: 0 }
     const covered = new Set(compacted.flatMap((turn) => turn.items.map((item) => item.key)))
-    for (const index of selected) {
-        for (const item of turns[index].items) {
-            if (item.kind === "text" && covered.has(item.key)) textKeys.add(item.key)
-        }
-    }
-    const reasoning = turns
-        .slice(selected[0], selected.at(-1)! + 1)
-        .flatMap((turn) => turn.items)
-        .filter((item) => item.kind === "reasoning" && covered.has(item.key))
     const itemCost = (item: Item) =>
         codec.estimateTurns([{ key: "protected", stamp: 0, role: "assistant", items: [item] }])
-    const textCost = compacted.reduce(
-        (total, turn) =>
-            total +
-            turn.items.reduce(
-                (sum, item) => sum + (textKeys.has(item.key) ? itemCost(item) : 0),
-                0,
-            ),
-        0,
-    )
     const toolCost = compacted.reduce(
         (total, turn) =>
             total +
@@ -1318,33 +1346,83 @@ function selectAnchoredConversation(
             ),
         0,
     )
-    // Reserve room for the next provider response and unpriced host wrappers;
-    // the user's 28k reasoning setting is a fallback when the whole interval
-    // cannot safely share the provider window with the five outputs.
+    // Reserve room for the next provider response and unpriced host wrappers.
+    // Prefer five outputs with all reasoning between them, then four, three,
+    // or two. Only when even two do not fit does the reasoning use its
+    // configured fallback budget. Tool calls have their own allowance.
     const buffer = Math.min(
         Math.ceil(contextLimit * 0.2),
         Math.max(8_192, Math.ceil(contextLimit * 0.1)),
     )
-    const available = Math.max(
+    const availableBeforeOutputs = Math.max(
         0,
         contextLimit -
             overheadTokens -
             codec.estimateTurns(rawTail) -
-            textCost -
             toolCost -
             buffer -
             Math.max(512, Math.ceil(contextLimit * 0.01)),
     )
-    const needed = reasoning.reduce((total, item) => total + itemCost(item), 0)
-    const limited = needed > available
-    let remaining = limited ? Math.min(available, fallbackReasoningBudget) : available
+    let textKeys = new Set<string>()
+    let reasoning: Item[] = []
+    let available = 0
+    let limited = false
+    let selectedOutputCount = 0
+    let needed = 0
+    const minimum = Math.min(2, selected.length)
+    for (let count = selected.length; count >= minimum; count--) {
+        const group = selected.slice(-count)
+        const texts = new Set<string>()
+        for (const index of group) {
+            for (const item of turns[index].items) {
+                if (item.kind === "text" && covered.has(item.key)) texts.add(item.key)
+            }
+        }
+        const thoughts = turns
+            .slice(group[0], group.at(-1)! + 1)
+            .flatMap((turn) => turn.items)
+            .filter((item) => item.kind === "reasoning" && covered.has(item.key))
+        const textCost = compacted.reduce(
+            (total, turn) =>
+                total +
+                turn.items.reduce(
+                    (sum, item) => sum + (texts.has(item.key) ? itemCost(item) : 0),
+                    0,
+                ),
+            0,
+        )
+        const room = Math.max(0, availableBeforeOutputs - textCost)
+        const reasoningCost = thoughts.reduce((total, item) => total + itemCost(item), 0)
+        if (textCost + reasoningCost > availableBeforeOutputs && count > minimum) continue
+        textKeys = texts
+        reasoning = thoughts
+        available = room
+        needed = reasoningCost
+        limited = textCost + reasoningCost > availableBeforeOutputs
+        selectedOutputCount = count
+        break
+    }
+    // This is the single allowance for the chosen span, not a second 28k
+    // bucket stacked on top of already-selected reasoning. A user who disables
+    // reasoning with zero still gets zero; positive fallback settings reserve
+    // at least 20k when the model window has that much room.
+    const fallbackGoal = fallbackReasoningBudget > 0 ? Math.max(20_000, fallbackReasoningBudget) : 0
+    const allowance = limited ? Math.min(available, fallbackGoal) : available
+    let remaining = allowance
     for (const item of [...reasoning].reverse()) {
         const cost = itemCost(item)
         if (cost > remaining) break
         reasoningKeys.add(item.key)
         remaining -= cost
     }
-    return { textKeys, reasoningKeys, limited }
+    return {
+        textKeys,
+        reasoningKeys,
+        limited,
+        floorUnmet:
+            limited && fallbackGoal > 0 && needed >= 20_000 && allowance - remaining < 20_000,
+        outputCount: selectedOutputCount,
+    }
 }
 
 function selectRecentReasoningKeys(
@@ -1511,13 +1589,16 @@ function synthesizeReferenceTurn(
                               `- "${ctx.transcriptRelativePath}"`,
                               "",
                               "If exact prior wording, raw tool output, or omitted implementation detail is needed, inspect the reference file instead of guessing.",
-                          ]
+                           ]
                         : [
                               "Exact older details are available through better_compact_recall when needed; use it sparingly.",
                               ...(ctx.archiveCatalogText
                                   ? ["", "## Ready archives", ctx.archiveCatalogText]
                                   : []),
                           ]),
+                    ...(ctx.validatedCheckpoint
+                        ? ["", "## Current validated handoff", ctx.validatedCheckpoint]
+                        : []),
                     ...(latestTodoState ? ["", latestTodoState] : []),
                 ].join("\n"),
             },

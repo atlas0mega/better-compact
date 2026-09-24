@@ -133,6 +133,10 @@ export async function processBoundaryTransform(input: {
             newArchiveEntry = receipt.entry !== null
             plan.archiveGeneration = catalog.entries.length
             plan.archiveCatalogText = liveArchiveDescriptions(catalog)
+            plan.validatedCheckpoint =
+                catalog.validatedCheckpointId && catalog.checkpoint
+                    ? catalog.checkpoint
+                    : undefined
             plan.retirementThrough = catalog.retirementThrough
             if (receipt.entry) {
                 input.logger.info("Archived Better Compact delta", {
@@ -172,6 +176,10 @@ export async function processBoundaryTransform(input: {
             prefixSummaryAllowed: profile.prefixSummary,
             collapsePercent: profile.collapsePercent,
             archiveCatalogText: liveArchiveDescriptions(catalog),
+            validatedCheckpoint:
+                catalog.validatedCheckpointId && catalog.checkpoint
+                    ? catalog.checkpoint
+                    : undefined,
             archiveGeneration: catalog.entries.length,
             providerReportedTokens: input.providerReportedTokens,
             providerHistoryTokens,
@@ -248,6 +256,10 @@ export async function processBoundaryTransform(input: {
         prefixSummaryAllowed: profile.prefixSummary,
         collapsePercent: profile.collapsePercent,
         archiveCatalogText: liveArchiveDescriptions(catalog),
+        validatedCheckpoint:
+            catalog.validatedCheckpointId && catalog.checkpoint
+                ? catalog.checkpoint
+                : undefined,
         archiveGeneration: catalog.entries.length,
         retirementThrough: migrationRetirement ?? catalog.retirementThrough,
         ...(migrationHandoff ? { prefixSummary: migrationHandoff } : {}),
@@ -273,6 +285,10 @@ export async function processBoundaryTransform(input: {
         prefixSummaryAllowed: profile.prefixSummary,
         collapsePercent: profile.collapsePercent,
         archiveCatalogText: liveArchiveDescriptions(catalog),
+        validatedCheckpoint:
+            catalog.validatedCheckpointId && catalog.checkpoint
+                ? catalog.checkpoint
+                : undefined,
         archiveGeneration: catalog.entries.length,
         retirementThrough: migrationRetirement ?? catalog.retirementThrough,
         ...(migrationHandoff ? { prefixSummary: migrationHandoff } : {}),
@@ -324,6 +340,7 @@ export async function processBoundaryTransform(input: {
                       candidate.validatedCheckpointId = last.id
                       candidate.retirementThrough = eligibleRetirementThrough(candidate, last.sequence)
                       return {
+                          checkpoint: result.handoff,
                           handoff: retainArchivedUserText(
                               result.handoff,
                               turns,

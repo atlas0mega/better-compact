@@ -56,13 +56,15 @@ export interface BoundaryContextOptions {
     recentReasoningBudgetTokens?: number
     /** OpenCode-only: number of latest real assistant text outputs to anchor with reasoning. */
     recentAssistantOutputs?: number
-    /** OpenCode opt-in: selected tool/reasoning parts survive a last-resort prefix. */
+    /** OpenCode opt-in: selected tool/reasoning parts survive a validated prefix. */
     preservePrefixBudgets?: boolean
     force?: boolean
     assistantSummaries?: Record<string, string>
     prefixSummary?: string
     /** OpenCode-only small ready-archive list; stable across replay. */
     archiveCatalogText?: string
+    /** OpenCode-only validated prior handoff shown when no new prefix replaces it. */
+    validatedCheckpoint?: string
     /** Compaction ordinal when exact private archiving is enabled. */
     archiveGeneration?: number
     /** Last eligible archive ordinal whose wording has a validated handoff. */
@@ -133,7 +135,13 @@ export interface BoundaryContextPlan {
     assistantSurvivesPrefix?: boolean
     /** The complete anchored reasoning interval exceeded the provider window. */
     anchorReasoningLimited?: boolean
+    /** Even the fallback reasoning floor could not fit in the provider window. */
+    anchorReasoningFloorUnmet?: boolean
+    /** Number of recent real assistant outputs selected with coherent reasoning. */
+    anchoredOutputCount?: number
     preservePrefixBudgets?: boolean
+    /** OpenCode-only: the prefix can only be replaced by an explicit model handoff. */
+    modelOnlyPrefix?: true
     rawTailStartIndex: number
     rawTailStartMessageId: string
     rawTailItemBoundary?: RawTailItemBoundary
@@ -152,6 +160,7 @@ export interface BoundaryContextPlan {
     assistantSummaries: Record<string, string>
     prefixSummary?: string
     archiveCatalogText?: string
+    validatedCheckpoint?: string
     archiveGeneration?: number
     retirementThrough?: number
 }
@@ -183,7 +192,10 @@ export interface PlanSnapshot {
     protectedAssistantItemKeys?: string[]
     assistantSurvivesPrefix?: boolean
     anchorReasoningLimited?: boolean
+    anchorReasoningFloorUnmet?: boolean
+    anchoredOutputCount?: number
     preservePrefixBudgets?: boolean
+    modelOnlyPrefix?: true
     requiresCustomCompaction: boolean
     preservedToolCallIds?: string[]
     toolSurvivesPrefix?: boolean
@@ -195,6 +207,7 @@ export interface PlanSnapshot {
     assistantSummaries?: Record<string, string>
     prefixSummary?: string
     archiveCatalogText?: string
+    validatedCheckpoint?: string
     archiveGeneration?: number
     retirementThrough?: number
     stages?: Array<{
@@ -236,7 +249,10 @@ export function toPlanSnapshot(plan: BoundaryContextPlan): PlanSnapshot {
         protectedAssistantItemKeys: plan.protectedAssistantItemKeys,
         assistantSurvivesPrefix: plan.assistantSurvivesPrefix,
         anchorReasoningLimited: plan.anchorReasoningLimited,
+        anchorReasoningFloorUnmet: plan.anchorReasoningFloorUnmet,
+        anchoredOutputCount: plan.anchoredOutputCount,
         preservePrefixBudgets: plan.preservePrefixBudgets,
+        modelOnlyPrefix: plan.modelOnlyPrefix,
         requiresCustomCompaction: plan.requiresCustomCompaction,
         preservedToolCallIds: plan.preservedToolCallIds,
         toolSurvivesPrefix: plan.toolSurvivesPrefix,
@@ -247,6 +263,7 @@ export function toPlanSnapshot(plan: BoundaryContextPlan): PlanSnapshot {
         assistantSummaries: plan.assistantSummaries,
         prefixSummary: plan.prefixSummary,
         archiveCatalogText: plan.archiveCatalogText,
+        validatedCheckpoint: plan.validatedCheckpoint,
         archiveGeneration: plan.archiveGeneration,
         retirementThrough: plan.retirementThrough,
         stages: plan.stages,

@@ -10,6 +10,8 @@ export function formatBoundaryReport(
     const now = plan.afterPruneTokens
     const reduced = Math.max(0, before - now)
     const reductionPercent = before > 0 ? Math.round((reduced / before) * 100) : 0
+    const targetPercent = Math.round((plan.targetTokens / Math.max(1, plan.contextLimit)) * 100)
+    const reasoningFallback = plan.recentReasoningBudgetTokens ?? 0
     const rawEstimate = plan.stages[0]?.beforeTokens
     const residual = plan.residual
     const retained = residual
@@ -45,8 +47,8 @@ export function formatBoundaryReport(
                           ? "did not reach target"
                           : "not needed"
             const label =
-                stage.name === "prefix-summary" && summaryCalls === 0
-                    ? "Deterministic prefix fallback"
+                stage.name === "prefix-summary" && plan.modelOnlyPrefix
+                    ? "Validated prefix handoff"
                     : stage.label
             return `  ${icon} ${label.padEnd(38)} ${detail}`
         })
@@ -60,14 +62,20 @@ export function formatBoundaryReport(
         formatContextWindowLine("Now", now, plan.contextLimit, "projected"),
         "",
         `  Reduced ${formatTokenCount(reduced)} (${reductionPercent}%)`,
+        `  Target ${formatTokenCount(plan.targetTokens)} (${targetPercent}% best effort; not a minimum)`,
         now > plan.targetTokens
-            ? `  Target ${formatTokenCount(plan.targetTokens)}; ${formatTokenCount(now - plan.targetTokens)} still above target`
+            ? `  ${formatTokenCount(now - plan.targetTokens)} still above target`
             : undefined,
         now > plan.targetTokens && largest.length > 0
             ? `  Largest retained components: ${largest.map(([label, tokens]) => `${label} ~${formatTokenCount(tokens)}`).join(", ")}`
             : undefined,
         plan.anchorReasoningLimited
-            ? `  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most ${formatTokenCount(plan.recentReasoningBudgetTokens ?? 0)}. Exact history remains in the private archive.`
+            ? `  ${plan.anchoredOutputCount ?? 2}-output reasoning span exceeded the safe window; kept the outputs and used one bounded reasoning allowance (up to ${formatTokenCount(reasoningFallback > 0 ? Math.max(20_000, reasoningFallback) : 0)} when it fits). Exact history remains in the private archive.`
+            : plan.anchoredOutputCount && plan.recentAssistantOutputs && plan.anchoredOutputCount < plan.recentAssistantOutputs
+              ? `  Kept the last ${plan.anchoredOutputCount} real assistant outputs with their intervening reasoning inside the provider-window buffer.`
+            : undefined,
+        plan.anchorReasoningFloorUnmet
+            ? `  The provider window could not fit the 20K reasoning minimum beside ${plan.anchoredOutputCount ?? 2} outputs and protected context.`
             : undefined,
         "",
         "  Actions",

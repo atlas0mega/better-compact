@@ -119,13 +119,14 @@ test("boundary report shows visual context bars without internal threshold jargo
     assert.match(report, /Now\s+.+\[/)
     assert.match(report, /Actions/)
     assert.match(report, /Reference/)
-    assert.doesNotMatch(report, /^\s*Target\s+/m)
+    assert.match(report, /Target 6K \(30% best effort; not a minimum\)/)
+    assert.match(report, /still above target/)
     assert.doesNotMatch(report, /Projected after/i)
     assert.doesNotMatch(report, /Trigger threshold/i)
     assert.doesNotMatch(report, /Last-resort target/i)
 })
 
-test("zero model calls labels deterministic prefix savings without implying Luna output", () => {
+test("zero model calls never label an OpenCode prefix as a deterministic fallback", () => {
     const plan = buildBoundaryContextPlan(
         [
             message("u1", "user", [textPart("u1", "Keep current goals")], 1),
@@ -142,8 +143,8 @@ test("zero model calls labels deterministic prefix savings without implying Luna
         report,
         /Luna calls: 0\. Stage changes are context deltas, not model response sizes/,
     )
-    if (plan.stages.some((stage) => stage.name === "prefix-summary" && stage.status !== "skipped"))
-        assert.match(report, /Deterministic prefix fallback/)
+    assert.equal(plan.requiresCustomCompaction, false)
+    assert.doesNotMatch(report, /Deterministic prefix fallback/)
 })
 
 test("an applied summary stage with no net savings is not reported as unused", () => {
@@ -209,7 +210,8 @@ test("report distinguishes expanding stages and unmet target from provider start
         ],
     })
     assert.match(report, /Summarized assistant turns\s+increased \+5K/)
-    assert.match(report, /Target 8K; 7K still above target/)
+    assert.match(report, /Target 8K \(20% best effort; not a minimum\)/)
+    assert.match(report, /7K still above target/)
     assert.match(report, /30K local raw estimate; Before is provider-reported/)
 })
 
@@ -224,11 +226,34 @@ test("above-target report identifies the largest final retained components", () 
         ],
         { contextLimit: 20_000, force: true, targetTokens: 1, archiveCatalogText: "" },
     )
-    assert.ok(plan?.requiresCustomCompaction)
+    assert.ok(plan)
+    assert.equal(plan.requiresCustomCompaction, false)
     assert.ok(plan.residual)
     const report = formatBoundaryReport(plan)
     assert.match(report, /still above target/)
     assert.match(report, /Largest retained components: /)
     assert.match(report, /recent raw tail|handoff\/reference and archive catalog/)
     assert.doesNotMatch(report, /Largest retained components: .*undefined/)
+})
+
+test("report explains a two-output reasoning shortfall without adding a second reserve", () => {
+    const plan = buildBoundaryContextPlan(
+        [
+            message("u-old", "user", [textPart("u-old", "Older request")], 1),
+            message("a-old", "assistant", [textPart("a-old", "Prior work ".repeat(100))], 2),
+            message("u-now", "user", [textPart("u-now", "Current request")], 3),
+        ],
+        { contextLimit: 12_000, force: true, minTailUserTurns: 1 },
+    )
+    assert.ok(plan)
+    const report = formatBoundaryReport({
+        ...plan,
+        anchoredOutputCount: 2,
+        recentAssistantOutputs: 5,
+        recentReasoningBudgetTokens: 28_000,
+        anchorReasoningLimited: true,
+        anchorReasoningFloorUnmet: true,
+    })
+    assert.match(report, /one bounded reasoning allowance \(up to 28K when it fits\)/)
+    assert.match(report, /could not fit the 20K reasoning minimum beside 2 outputs/)
 })

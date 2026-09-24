@@ -54,7 +54,7 @@ function config(): PluginConfig {
     }
 }
 
-test("a failed or skipped handoff keeps first-boundary wording until older descriptions are ready", async () => {
+test("a validated handoff keeps first-boundary wording until older descriptions are ready", async () => {
     const directory = mkdtempSync(join(tmpdir(), "bc-intent-aging-"))
     const logger = new Logger(false)
     const state = createSessionState(sessionId)
@@ -165,7 +165,7 @@ test("a failed or skipped handoff keeps first-boundary wording until older descr
         afterSecond.entries.every((e) => e.status === "pending"),
         "descriptions run separately in the background",
     )
-    assert.ok(afterSecond.checkpoint)
+    assert.equal(afterSecond.checkpoint, handoff)
     assert.match(JSON.stringify(second), /Use the original blue policy for parser migration/)
     assert.match(JSON.stringify(second), /red policy/i)
     assert.deepEqual(
@@ -303,6 +303,7 @@ test("round two retires only described older wording and keeps the newly archive
             "## Next step",
             "- Validate the migration tests.",
         ].join("\n")
+    let firstCheapProjection = 0
     await processBoundaryTransform({
         state,
         logger,
@@ -310,13 +311,19 @@ test("round two retires only described older wording and keeps the newly archive
         directory,
         messages: first,
         summariesAllowed: true,
-        summarizeArchive: async () => ({ ok: true, calls: 1, handoff: sections("Blue was replaced by red.") }),
+        summarizeArchive: async (plan) => {
+            firstCheapProjection = plan.afterPruneTokens
+            assert.equal(plan.requiresCustomCompaction, false)
+            return { ok: true, calls: 1, handoff: sections("Blue was replaced by red.") }
+        },
     })
     const catalog = await loadArchiveCatalog(directory, sessionId)
     assert.equal(catalog.entries.length, 1)
     assert.equal(catalog.retirementThrough, undefined)
     assert.match(JSON.stringify(first), /Old blue policy verbatim/)
     assert.ok(catalog.checkpoint)
+    assert.ok(state.boundary.activePlan?.requiresCustomCompaction)
+    assert.ok(state.boundary.activePlan.afterPruneTokens < firstCheapProjection)
 
     catalog.entries[0].status = "ready"
     catalog.entries[0].description = "Blue parser work superseded by red; tests are next."
@@ -326,6 +333,7 @@ test("round two retires only described older wording and keeps the newly archive
         message("new-work", "assistant", `Red parser migration ${"checked tests ".repeat(1_500)}`, 12),
         message("new-user", "user", "Keep the red correction and finish tests.", 13),
     ]
+    let secondCheapProjection = 0
     await processBoundaryTransform({
         state,
         logger,
@@ -333,11 +341,17 @@ test("round two retires only described older wording and keeps the newly archive
         directory,
         messages: advanced,
         summariesAllowed: true,
-        summarizeArchive: async () => ({ ok: true, calls: 1, handoff: sections("Red policy is current.") }),
+        summarizeArchive: async (plan) => {
+            secondCheapProjection = plan.afterPruneTokens
+            assert.equal(plan.requiresCustomCompaction, false)
+            return { ok: true, calls: 1, handoff: sections("Red policy is current.") }
+        },
     })
     const second = await loadArchiveCatalog(directory, sessionId)
     assert.equal(second.entries.length, 2)
     assert.equal(second.retirementThrough, 1)
+    assert.ok(state.boundary.activePlan?.requiresCustomCompaction)
+    assert.ok(state.boundary.activePlan.afterPruneTokens < secondCheapProjection)
     assert.doesNotMatch(JSON.stringify(advanced), /Old blue policy verbatim/)
     assert.match(JSON.stringify(advanced), /Correction: use red policy instead of blue/)
     assert.deepEqual(
