@@ -15,11 +15,7 @@ import { saveSessionState, type SessionState, type WithParts } from "../state"
 import { boundaryRangeHash } from "./fingerprint"
 import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore } from "./transcripts"
-import {
-    adaptiveTailUserTurns,
-    efficientAgenticTailBudget,
-    providerAlignedHistoryTokens,
-} from "./context"
+import { adaptiveTailUserTurns, efficientAgenticTailBudget } from "./context"
 import {
     archiveBoundaryDelta,
     archiveOversizedSummary,
@@ -48,6 +44,7 @@ export async function processBoundaryTransform(input: {
     directory: string
     messages: WithParts[]
     providerReportedTokens?: number
+    forceOverflow?: boolean
     onOutcome?: (outcome: "planned" | "replayed" | "unchanged") => void
     summariesAllowed?: boolean
     summarize?: (jobs: BoundarySummaryJob[]) => Promise<Record<string, string>>
@@ -144,11 +141,6 @@ export async function processBoundaryTransform(input: {
         },
     }
     const profile = resolveCompactionProfile(input.config)
-    const providerHistoryTokens = providerAlignedHistoryTokens(
-        input.state,
-        input.messages,
-        input.providerReportedTokens,
-    )
     if (
         oldPlan &&
         catalog.checkpoint &&
@@ -174,7 +166,6 @@ export async function processBoundaryTransform(input: {
             archiveCatalogText: liveArchiveDescriptions(catalog),
             archiveGeneration: catalog.entries.length,
             providerReportedTokens: input.providerReportedTokens,
-            providerHistoryTokens,
             priorPlan: oldPlan,
             force: true,
             preservePrefixBudgets: true,
@@ -252,7 +243,6 @@ export async function processBoundaryTransform(input: {
         retirementThrough: migrationRetirement ?? catalog.retirementThrough,
         ...(migrationHandoff ? { prefixSummary: migrationHandoff } : {}),
         providerReportedTokens: input.providerReportedTokens,
-        providerHistoryTokens,
         priorPlan: oldPlan ?? undefined,
     })
     const engine = createEngine(openCodeSpec, ports)
@@ -277,7 +267,7 @@ export async function processBoundaryTransform(input: {
         retirementThrough: migrationRetirement ?? catalog.retirementThrough,
         ...(migrationHandoff ? { prefixSummary: migrationHandoff } : {}),
         providerReportedTokens: input.providerReportedTokens,
-        providerHistoryTokens,
+        triggerFromProviderOnly: true,
         summariesAllowed: input.summariesAllowed,
         summarize: input.summariesAllowed === false ? undefined : input.summarize,
         summarizePrefix:
@@ -322,7 +312,10 @@ export async function processBoundaryTransform(input: {
                       if (!last) return null
                       candidate.checkpoint = result.handoff
                       candidate.validatedCheckpointId = last.id
-                      candidate.retirementThrough = eligibleRetirementThrough(candidate, last.sequence)
+                      candidate.retirementThrough = eligibleRetirementThrough(
+                          candidate,
+                          last.sequence,
+                      )
                       return {
                           handoff: retainArchivedUserText(
                               result.handoff,
@@ -371,6 +364,7 @@ export async function processBoundaryTransform(input: {
                       }
                   },
         force:
+            input.forceOverflow === true ||
             migrationHandoff !== undefined ||
             changedArchivedPrefix ||
             migratePluginInjections ||
@@ -427,9 +421,7 @@ export function retainArchivedUserText(
             .map(([id]) => id),
     )
     const exact = prefixUserMessages(
-        turns
-            .slice(0, rawTailStart)
-            .filter((turn) => !retiredUserIds.has(turn.key)),
+        turns.slice(0, rawTailStart).filter((turn) => !retiredUserIds.has(turn.key)),
         openCodeConventions,
         turns.slice(rawTailStart),
     )

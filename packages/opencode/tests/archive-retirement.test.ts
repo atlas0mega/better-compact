@@ -74,6 +74,7 @@ test("a failed or skipped handoff keeps first-boundary wording until older descr
     const first = structuredClone(original)
     await processBoundaryTransform({
         state,
+        providerReportedTokens: 20_000,
         logger,
         config: config(),
         directory,
@@ -95,6 +96,7 @@ test("a failed or skipped handoff keeps first-boundary wording until older descr
     settingsOnly.compaction.custom!.targetPercent = 2
     await processBoundaryTransform({
         state,
+        providerReportedTokens: 20_000,
         logger,
         config: settingsOnly,
         directory,
@@ -135,6 +137,7 @@ test("a failed or skipped handoff keeps first-boundary wording until older descr
     let calls = 0
     await processBoundaryTransform({
         state,
+        providerReportedTokens: 20_000,
         logger,
         config: config(),
         directory,
@@ -202,6 +205,7 @@ test("OpenCode attempts a Luna handoff from the cheap plan before falling back",
     const outgoing = structuredClone(messages)
     const plan = await processBoundaryTransform({
         state,
+        providerReportedTokens: 20_000,
         logger: new Logger(false),
         config: config(),
         directory,
@@ -225,6 +229,7 @@ test("OpenCode attempts a Luna handoff from the cheap plan before falling back",
     let withinBandCalls = 0
     await processBoundaryTransform({
         state: otherState,
+        providerReportedTokens: 20_000,
         logger: new Logger(false),
         config: withinBand,
         directory: mkdtempSync(join(tmpdir(), "bc-luna-band-")),
@@ -278,6 +283,7 @@ test("an older catalog checkpoint alone cannot retire first-boundary wording", a
     ]
     await processBoundaryTransform({
         state,
+        providerReportedTokens: 20_000,
         logger,
         config: config(),
         directory,
@@ -306,6 +312,7 @@ test("an older catalog checkpoint alone cannot retire first-boundary wording", a
     const migrated = structuredClone(original)
     await processBoundaryTransform({
         state,
+        providerReportedTokens: 20_000,
         logger,
         config: config(),
         directory,
@@ -321,6 +328,7 @@ test("an older catalog checkpoint alone cannot retire first-boundary wording", a
     const replay = structuredClone(original)
     await processBoundaryTransform({
         state,
+        providerReportedTokens: 20_000,
         logger,
         config: config(),
         directory,
@@ -369,6 +377,7 @@ test("round two retires only described older wording and keeps the newly archive
         ].join("\n")
     await processBoundaryTransform({
         state,
+        providerReportedTokens: 30_000,
         logger,
         config: config(),
         directory,
@@ -401,6 +410,7 @@ test("round two retires only described older wording and keeps the newly archive
     ]
     await processBoundaryTransform({
         state,
+        providerReportedTokens: 30_000,
         logger,
         config: config(),
         directory,

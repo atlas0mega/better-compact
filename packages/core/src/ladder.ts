@@ -77,27 +77,26 @@ export function buildPlan(
         inputs.providerReportedTokens && inputs.providerReportedTokens > 0
             ? inputs.providerReportedTokens
             : 0
-    // The provider total comes from the *previous* request. New user/tool
-    // content in the current history was not in that request; subtracting it
-    // to infer system/schema overhead understates the next outgoing context.
-    // When supplied, compare the provider reading to its own aligned history.
-    const alignedOverhead =
-        providerReportedTokens > 0 &&
-        inputs.providerHistoryTokens !== undefined &&
-        Number.isFinite(inputs.providerHistoryTokens)
-            ? Math.max(0, providerReportedTokens - inputs.providerHistoryTokens)
-            : 0
-    const overheadTokens =
-        providerReportedTokens > 0
-            ? Math.max(0, providerReportedTokens - rawEstimateTokens, alignedOverhead)
-            : 0
+    // The last provider response measures a *different request*. Subtracting
+    // a reconstructed history from it and adding that gap to today's outgoing
+    // plan invented fixed "overhead" (100k in a live session). Price the
+    // transformed request on its own local scale; the next response supplies
+    // its real provider total. Unknown host schemas cannot be priced here.
+    const overheadTokens = 0
     const estimator: Estimator = { overheadTokens }
     const beforeTokens = providerReportedTokens > 0 ? providerReportedTokens : rawEstimateTokens
     const triggerTokens = inputs.triggerTokens ?? Math.floor(contextLimit * triggerRatio)
-    // Either scale crossing the trigger means the request is in danger: the
-    // provider total sees overhead the estimate cannot, and the estimate sees
-    // fresh turns the provider has not priced yet.
-    if (!inputs.force && Math.max(beforeTokens, rawEstimateTokens) < triggerTokens) return null
+    // OpenCode's ordinary automatic trigger is the last completed provider
+    // response. A locally estimated raw transcript must not force a new plan
+    // below that reading. Explicit manual requests and the host's separate
+    // hard-overflow guard use `force`; other adapters retain their own policy.
+    if (
+        !inputs.force &&
+        (inputs.triggerFromProviderOnly
+            ? providerReportedTokens
+            : Math.max(beforeTokens, rawEstimateTokens)) < triggerTokens
+    )
+        return null
 
     const targetTokens = inputs.targetTokens ?? Math.floor(contextLimit * targetRatio)
     // A token budget replaces the count-based tail outright: its ceiling is
@@ -836,7 +835,7 @@ export interface Engine {
         recentReasoningBudgetTokens?: number
         recentAssistantOutputs?: number
         providerReportedTokens?: number
-        providerHistoryTokens?: number
+        triggerFromProviderOnly?: boolean
         tailBudgetTokens?: { floor: number; ceiling: number }
         minTailUserTurns?: number
         summariesAllowed?: boolean
@@ -891,7 +890,7 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
             recentReasoningBudgetTokens,
             recentAssistantOutputs,
             providerReportedTokens,
-            providerHistoryTokens,
+            triggerFromProviderOnly,
             tailBudgetTokens,
             minTailUserTurns,
             summariesAllowed,
@@ -967,7 +966,7 @@ export function createEngine(spec: LadderSpec, ports: EnginePorts): Engine {
                 recentReasoningBudgetTokens,
                 recentAssistantOutputs,
                 providerReportedTokens,
-                providerHistoryTokens,
+                triggerFromProviderOnly,
                 tailBudgetTokens,
                 minTailUserTurns,
                 summariesAllowed,

@@ -210,7 +210,12 @@ test("report distinguishes expanding stages and unmet target from provider start
     })
     assert.match(report, /Summarized assistant turns\s+increased \+5K/)
     assert.match(report, /Target 8K; 7K still above target/)
-    assert.match(report, /30K local raw estimate; Before is provider-reported/)
+    assert.match(
+        report,
+        /Local history reduced 15K \(50%\) estimated; provider savings pending next response/,
+    )
+    assert.match(report, /30K local raw estimate; Before is from the previous provider response/)
+    assert.doesNotMatch(report, /^\s*Reduced 5K/m)
 })
 
 test("above-target report identifies the largest final retained components", () => {
@@ -231,4 +236,38 @@ test("above-target report identifies the largest final retained components", () 
     assert.match(report, /Largest retained components: /)
     assert.match(report, /recent raw tail|handoff\/reference and archive catalog/)
     assert.doesNotMatch(report, /Largest retained components: .*undefined/)
+})
+
+test("a large provider/history gap is not reported as irreducible host overhead", () => {
+    const base = buildBoundaryContextPlan(
+        [
+            message("u1", "user", [textPart("u1", "Preserve current task")], 1),
+            message("a1", "assistant", [textPart("a1", "Earlier work ".repeat(80))], 2),
+            message("u2", "user", [textPart("u2", "Continue")], 3),
+            message("a2", "assistant", [textPart("a2", "Recent work")], 4),
+            message("u3", "user", [textPart("u3", "Current correction")], 5),
+        ],
+        { contextLimit: 262_144, force: true },
+    )
+    assert.ok(base)
+    const report = formatBoundaryReport({
+        ...base,
+        beforeTokens: 143_383,
+        afterPruneTokens: 118_463,
+        targetTokens: 65_536,
+        residual: {
+            rawTailTokens: 0,
+            protectedPartTokens: 16_000,
+            handoffTokens: 933,
+            otherTokens: 561,
+            overheadTokens: 100_969,
+        },
+    })
+    assert.match(
+        report,
+        /Provider\/history gap ~101K = last provider reading 143\.4K - estimated prior-request history 42\.4K/,
+    )
+    assert.match(report, /not verified fixed host overhead/)
+    assert.doesNotMatch(report, /provider overhead estimate/)
+    assert.doesNotMatch(report, /Largest retained components: .*gap/)
 })

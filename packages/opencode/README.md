@@ -167,11 +167,21 @@ tool content advances, in the awaited pre-provider transform before the same
 agent loop continues, or on `session.idle` when the turn terminates. An
 unchanged queuing prompt alone does not activate it.
 
+Automatic triggering uses the last completed provider response's reported
+tokens, including in agent/tool loops; it does not infer a trigger from the
+raw stored transcript. An outgoing request estimated beyond the model window
+still uses the separate forced overflow guard. Planning prices the transformed
+messages on one local scale; the previous provider reading is not subtracted
+from a reconstructed history and added back as imaginary fixed overhead.
+The report distinguishes local projected history from the provider reading,
+which updates after the next response and may include unpriced system/tool
+schemas and provider accounting.
+
 In OpenCode's archive workflow, deterministic pruning comes first. The
 25% target in the current live configuration is best-effort: a new last-resort
 prefix starts only above 115% of the target. It retains the newest complete
 pruned turns natively in available projected context, counting protected
-reasoning, tools, the handoff, raw tail, and overhead together. OpenCode also
+reasoning, tools, the handoff, and raw tail together. OpenCode also
 anchors its last five real assistant text outputs with the reasoning between
 them, excluding tool calls. **Five is a reasoning-span anchor, not a cap on
 assistant chat:** after reserving genuine user wording, additional whole

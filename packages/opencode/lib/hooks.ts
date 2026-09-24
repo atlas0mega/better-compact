@@ -20,7 +20,6 @@ import {
     completeBoundaryJob,
     failBoundaryJob,
     processBoundaryTransform,
-    providerAlignedHistoryTokens,
     setBoundaryStage,
     startBoundaryJob,
     storeBoundaryPlan,
@@ -398,6 +397,7 @@ export function createChatMessageTransformHandler(
                 sessionId,
                 messages,
                 params: currentParams,
+                forceOverflow: outgoingEstimate >= contextLimit,
             })
             if (outcome === "engine_error" && originalMessages && state.boundary.activePlan)
                 applyBoundaryPlanSnapshot(messages, state.boundary.activePlan, {
@@ -446,6 +446,7 @@ async function runAutomaticTransform(input: {
     sessionId: string
     messages: WithParts[]
     params: ReturnType<typeof getCurrentParams>
+    forceOverflow?: boolean
 }): Promise<string> {
     try {
         const usageMessageId = getCurrentUsageMessageId(input.state, input.messages)
@@ -460,6 +461,7 @@ async function runAutomaticTransform(input: {
                 directory: input.workingDirectory,
                 messages: input.messages,
                 providerReportedTokens: getCurrentTokenUsage(input.state, input.messages),
+                forceOverflow: input.forceOverflow,
                 onOutcome: (outcome) => {
                     replayed = outcome === "replayed"
                 },
@@ -991,11 +993,6 @@ async function runBetterCompact(input: {
         input.currentTokens && input.currentTokens > 0
             ? input.currentTokens
             : getCurrentTokenUsage(input.state, input.messages)
-    const providerHistoryTokens = providerAlignedHistoryTokens(
-        input.state,
-        input.messages,
-        reportedCurrentTokens,
-    )
     startBoundaryJob(input.state, {
         id: input.jobId,
         sessionId: input.sessionId,
@@ -1068,7 +1065,6 @@ async function runBetterCompact(input: {
             prefixSummaryAllowed: profile.prefixSummary,
             collapsePercent: profile.collapsePercent,
             providerReportedTokens: reportedCurrentTokens,
-            providerHistoryTokens,
             summariesAllowed,
             archiveCatalogText: liveArchiveDescriptions(catalog),
             archiveGeneration: catalog.entries.length,
@@ -1276,7 +1272,6 @@ async function runBetterCompact(input: {
                     prefixSummaryAllowed: profile.prefixSummary,
                     collapsePercent: profile.collapsePercent,
                     providerReportedTokens: reportedCurrentTokens,
-                    providerHistoryTokens,
                     summariesAllowed,
                     priorPlan: modelFirst
                         ? (input.state.boundary.activePlan ?? undefined)
@@ -1411,7 +1406,6 @@ async function runBetterCompact(input: {
                     prefixSummaryAllowed: profile.prefixSummary,
                     collapsePercent: profile.collapsePercent,
                     providerReportedTokens: reportedCurrentTokens,
-                    providerHistoryTokens,
                     summariesAllowed,
                     priorPlan: toBoundaryPlanSnapshot(plan, input.messages),
                 })
@@ -1505,7 +1499,6 @@ async function runBetterCompact(input: {
                     prefixSummaryAllowed: profile.prefixSummary,
                     collapsePercent: profile.collapsePercent,
                     providerReportedTokens: reportedCurrentTokens,
-                    providerHistoryTokens,
                     summariesAllowed,
                     priorPlan: input.state.boundary.activePlan ?? undefined,
                 })

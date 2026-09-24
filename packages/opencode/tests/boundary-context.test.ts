@@ -19,7 +19,6 @@ import {
     buildBoundaryContextPlan,
     efficientAgenticTailBudget,
     processBoundaryTransform,
-    providerAlignedHistoryTokens,
     toBoundaryPlanSnapshot,
     writeBoundaryTranscript,
 } from "../lib/boundary"
@@ -60,8 +59,7 @@ function message(
     }
 }
 
-test("provider overhead aligns to the prior request, not a newly completed tool result", () => {
-    const state = createSessionState(sessionID)
+test("local plan size prices fresh tool results without inventing a provider overhead offset", () => {
     const prior = [
         message("old-user", "user", [textPart("old-user", "Remember violet widgets")], 1),
         message("old-assistant", "assistant", [textPart("old-assistant", "Earlier work")], 2),
@@ -83,8 +81,6 @@ test("provider overhead aligns to the prior request, not a newly completed tool 
         },
     })
     const messages = [...prior, current]
-    const aligned = providerAlignedHistoryTokens(state, messages, 4_000)
-    assert.equal(aligned, openCodeCodec.estimateTurns(openCodeCodec.encode(prior)) + 100)
     current.parts.push({
         id: "new-tool-result",
         messageID: current.info.id,
@@ -101,8 +97,21 @@ test("provider overhead aligns to the prior request, not a newly completed tool 
             time: { start: 4, end: 5 },
         },
     } as WithParts["parts"][number])
-    assert.equal(providerAlignedHistoryTokens(state, messages, 4_000), aligned)
-    assert.equal(providerAlignedHistoryTokens(state, messages, 3_900), undefined)
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 20_000,
+        providerReportedTokens: 4_000,
+        force: true,
+    })
+    assert.ok(plan)
+    assert.equal(plan.beforeTokens, 4_000)
+    assert.equal(plan.overheadTokens, 0)
+    const outgoing = structuredClone(messages)
+    assert.ok(
+        applyBoundaryPlanSnapshot(outgoing, toBoundaryPlanSnapshot(plan, messages), {
+            allowRegrown: true,
+        }),
+    )
+    assert.equal(plan.afterPruneTokens, openCodeCodec.estimateTurns(openCodeCodec.encode(outgoing)))
 })
 
 test("ignored Better Compact messages do not count as protected user turns", () => {

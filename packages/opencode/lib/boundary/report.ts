@@ -8,9 +8,11 @@ export function formatBoundaryReport(
     const before =
         actualCurrentTokens && actualCurrentTokens > 0 ? actualCurrentTokens : plan.beforeTokens
     const now = plan.afterPruneTokens
-    const reduced = Math.max(0, before - now)
-    const reductionPercent = before > 0 ? Math.round((reduced / before) * 100) : 0
     const rawEstimate = plan.stages[0]?.beforeTokens
+    const sameScale = rawEstimate === undefined || rawEstimate === before
+    const localBefore = rawEstimate ?? before
+    const reduced = Math.max(0, localBefore - now)
+    const reductionPercent = localBefore > 0 ? Math.round((reduced / localBefore) * 100) : 0
     const residual = plan.residual
     const retained = residual
         ? ([
@@ -18,7 +20,6 @@ export function formatBoundaryReport(
               ["protected reasoning/tools", residual.protectedPartTokens],
               ["handoff/reference and archive catalog", residual.handoffTokens],
               ["other retained content", residual.otherTokens],
-              ["provider overhead estimate", residual.overheadTokens],
           ] as const)
         : []
     const largest = [...retained]
@@ -59,12 +60,17 @@ export function formatBoundaryReport(
         formatContextWindowLine("Before", before, plan.contextLimit),
         formatContextWindowLine("Now", now, plan.contextLimit, "projected"),
         "",
-        `  Reduced ${formatTokenCount(reduced)} (${reductionPercent}%)`,
+        sameScale
+            ? `  Reduced ${formatTokenCount(reduced)} (${reductionPercent}%) projected`
+            : `  Local history reduced ${formatTokenCount(reduced)} (${reductionPercent}%) estimated; provider savings pending next response`,
         now > plan.targetTokens
             ? `  Target ${formatTokenCount(plan.targetTokens)}; ${formatTokenCount(now - plan.targetTokens)} still above target`
             : undefined,
         now > plan.targetTokens && largest.length > 0
             ? `  Largest retained components: ${largest.map(([label, tokens]) => `${label} ~${formatTokenCount(tokens)}`).join(", ")}`
+            : undefined,
+        residual?.overheadTokens
+            ? `  Provider/history gap ~${formatTokenCount(residual.overheadTokens)} = last provider reading ${formatTokenCount(plan.beforeTokens)} - estimated prior-request history ${formatTokenCount(Math.max(0, plan.beforeTokens - residual.overheadTokens))}; not verified fixed host overhead.`
             : undefined,
         plan.anchorReasoningLimited
             ? `  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most ${formatTokenCount(plan.recentReasoningBudgetTokens ?? 0)}. Exact history remains in the private archive.`
@@ -72,8 +78,8 @@ export function formatBoundaryReport(
         "",
         "  Actions",
         ...(stageRows.length > 0 ? stageRows : ["  (no stages applied)"]),
-        rawEstimate !== undefined && rawEstimate !== before
-            ? `  Stage changes use a ${formatTokenCount(rawEstimate)} local raw estimate; Before is provider-reported.`
+        !sameScale
+            ? `  Stage changes use a ${formatTokenCount(localBefore)} local raw estimate; Before is from the previous provider response, not the same request.`
             : undefined,
         summaryCalls !== undefined
             ? `  Luna calls: ${summaryCalls}. Stage changes are context deltas, not model response sizes.`

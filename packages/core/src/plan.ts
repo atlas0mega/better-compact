@@ -68,8 +68,8 @@ export interface BoundaryContextOptions {
     /** Last eligible archive ordinal whose wording has a validated handoff. */
     retirementThrough?: number
     providerReportedTokens?: number
-    /** Estimated history already present in the provider request whose usage is reported, plus its output tokens. */
-    providerHistoryTokens?: number
+    /** OpenCode automatic path: only the last completed provider response triggers normal compaction. */
+    triggerFromProviderOnly?: boolean
     /**
      * Token budget for the raw tail, expressed as a floor/ceiling pair. When
      * provided, the whole-turn count-based tail is refined by tokens: the tail

@@ -1258,7 +1258,7 @@ test("plan snapshot refuses to apply once the transformed output regrows past tr
     assert.equal(replayPlanSnapshot(regrown, snapshot, spec), null)
 })
 
-test("provider-reported totals keep plan accounting on a single scale", () => {
+test("a prior provider total cannot be added as fixed overhead to today's outgoing plan", () => {
     const turns = buildMultiRunConversation()
     const rawEstimate = codec.estimateTurns(turns)
     const providerReportedTokens = rawEstimate + 50_000
@@ -1275,24 +1275,21 @@ test("provider-reported totals keep plan accounting on a single scale", () => {
     assert.ok(plan)
 
     assert.equal(plan.beforeTokens, providerReportedTokens)
-    assert.equal(plan.overheadTokens, providerReportedTokens - rawEstimate)
-    assert.ok(plan.afterPruneTokens >= plan.overheadTokens)
-    assert.ok(plan.beforeTokens - plan.afterPruneTokens >= 0)
+    assert.equal(plan.overheadTokens, 0)
     for (const stage of plan.stages) {
-        assert.ok(stage.beforeTokens >= plan.overheadTokens)
-        assert.ok(stage.afterTokens >= plan.overheadTokens)
-        assert.ok(stage.clearedTokens <= plan.beforeTokens)
+        assert.ok(stage.beforeTokens >= 0)
+        assert.ok(stage.afterTokens >= 0)
     }
 
     const transformed = transformTurns(turns, plan.rawTailStartIndex, plan, spec)
-    assert.equal(plan.afterPruneTokens, codec.estimateTurns(transformed) + plan.overheadTokens)
+    assert.equal(plan.afterPruneTokens, codec.estimateTurns(transformed))
+    assert.equal(plan.stages[0]?.beforeTokens, rawEstimate)
 })
 
-test("fresh tool content cannot erase overhead measured against the previous provider history", () => {
+test("fresh tool content is priced on the outgoing scale without a reconstructed prior request", () => {
     const turns = buildMultiRunConversation()
     const rawCurrent = codec.estimateTurns(turns)
     const previousProviderTotal = rawCurrent + 1_000
-    const priorHistoryWithOutput = Math.floor(rawCurrent / 2)
     const plan = buildPlan(
         turns,
         inputs({
@@ -1300,16 +1297,15 @@ test("fresh tool content cannot erase overhead measured against the previous pro
             force: true,
             recentToolResultBudgetTokens: 0,
             providerReportedTokens: previousProviderTotal,
-            providerHistoryTokens: priorHistoryWithOutput,
         }),
         spec,
     )
     assert.ok(plan)
-    assert.equal(plan.overheadTokens, previousProviderTotal - priorHistoryWithOutput)
+    assert.equal(plan.beforeTokens, previousProviderTotal)
+    assert.equal(plan.overheadTokens, 0)
     assert.equal(
         plan.afterPruneTokens,
-        codec.estimateTurns(transformTurns(turns, plan.rawTailStartIndex, plan, spec)) +
-            plan.overheadTokens,
+        codec.estimateTurns(transformTurns(turns, plan.rawTailStartIndex, plan, spec)),
     )
 })
 
@@ -2651,17 +2647,25 @@ test("a consolidated prefix absorbs old per-turn summaries instead of caching th
     assert.deepEqual(extended.assistantSummaries, {})
 })
 
-test("planner triggers when either the provider total or the raw estimate crosses the trigger", () => {
+test("OpenCode automatic compaction waits for provider usage; manual and overflow paths may force", () => {
     const turns = buildLargeConversation()
     const estimate = codec.estimateTurns(turns)
     const contextLimit = Math.max(1, Math.floor(estimate / 0.9))
     assert.ok(estimate > Math.floor(contextLimit * 0.85))
 
-    // Provider total lags behind fresh turns the estimate already sees.
-    const plan = buildPlan(turns, inputs({ contextLimit, providerReportedTokens: 10 }), spec)
-    assert.ok(plan)
+    // A huge local raw transcript is not a measured trigger. The host still
+    // has a separate pre-request force path for an actual outgoing overflow.
+    const waiting = inputs({
+        contextLimit,
+        providerReportedTokens: 10,
+        triggerFromProviderOnly: true,
+    })
+    assert.equal(buildPlan(turns, waiting, spec), null)
+    assert.ok(buildPlan(turns, { ...waiting, force: true }, spec))
+    assert.ok(buildPlan(turns, { ...waiting, providerReportedTokens: contextLimit }, spec))
 
-    // Neither scale over the trigger: no plan.
+    // Other adapters retain their existing raw-estimate trigger policy.
+    assert.ok(buildPlan(turns, inputs({ contextLimit, providerReportedTokens: 10 }), spec))
     const calm = buildPlan(
         turns,
         inputs({ contextLimit: estimate * 4, providerReportedTokens: 10 }),

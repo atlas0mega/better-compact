@@ -394,6 +394,27 @@ test("idle auto-compaction uses the TUI provider count, not a huge archived tran
     assert.equal(state.boundary.automaticCheck?.seam, "pre_request")
 })
 
+test("pre-request waits for the last provider response below trigger despite a large raw history", async () => {
+    const sessionID = `ses-provider-trigger-${Date.now()}`
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 3_300)
+    const rawEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
+    const contextLimit = Math.ceil(rawEstimate / 0.9)
+    assert.ok(rawEstimate >= Math.floor(contextLimit * 0.85))
+    assert.ok(rawEstimate < contextLimit)
+    const client = transformClient(contextLimit)
+    const runtime = createRuntimeState(client, new Logger(false))
+    const output = { messages: structuredClone(messages) }
+    await transformHandler(
+        client,
+        runtime,
+        buildConfig("allow"),
+        mkdtempSync(join(tmpdir(), "better-compact-provider-trigger-")),
+    )({}, output)
+    assert.equal(runtime.get(sessionID).boundary.activePlan, null)
+    assert.equal(runtime.get(sessionID).boundary.automaticCheck?.providerTokens, 3_300)
+    assert.ok(!output.messages.some((item) => item.info.id.startsWith("msg_better_compact_")))
+})
+
 test("missing model limits report a reason at idle and before the next provider request", async () => {
     const sessionID = `ses-missing-limit-${Date.now()}`
     const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 9_000)

@@ -24,29 +24,6 @@ import { boundaryRangeHash } from "./fingerprint"
 import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore, transcriptCitablePath } from "./transcripts"
 import { inheritArchiveCatalog } from "./archive-catalog"
-import { getCurrentTokenUsage, getCurrentUsageMessageId } from "../token-utils"
-
-/** Align provider usage with the history at its request, before new tool/output parts. */
-export function providerAlignedHistoryTokens(
-    state: SessionState,
-    messages: WithParts[],
-    reportedTokens?: number,
-): number | undefined {
-    if (!reportedTokens || getCurrentTokenUsage(state, messages) !== reportedTokens) return undefined
-    const usageId = getCurrentUsageMessageId(state, messages)
-    const index = messages.findIndex((message) => message.info.id === usageId)
-    if (index < 0) return undefined
-    const earlier = structuredClone(messages.slice(0, index))
-    if (state.boundary.activePlan && earlier.length > 0)
-        applyBoundaryPlanSnapshot(earlier, state.boundary.activePlan, { allowRegrown: true })
-    const info = messages[index].info
-    if (info.role !== "assistant") return undefined
-    return (
-        openCodeCodec.estimateTurns(openCodeCodec.encode(earlier)) +
-        (info.tokens?.output ?? 0) +
-        (info.tokens?.reasoning ?? 0)
-    )
-}
 
 export type {
     BoundaryContextOptions,
@@ -224,9 +201,7 @@ export async function findMatchingBoundaryPlan(
 
 function forkTitleOf(title: string): string {
     const previous = title.match(/^(.+) \(fork #(\d+)\)$/)
-    return previous
-        ? `${previous[1]} (fork #${Number(previous[2]) + 1})`
-        : `${title} (fork #1)`
+    return previous ? `${previous[1]} (fork #${Number(previous[2]) + 1})` : `${title} (fork #1)`
 }
 
 export async function writeBoundaryTranscript(
