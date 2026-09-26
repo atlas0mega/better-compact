@@ -66,7 +66,10 @@ export function queuedBoundaryJob(
     if (
         queued?.jobId &&
         queued.jobStartedAt &&
-        (!job || job.id !== queued.jobId || job.startedAt < queued.jobStartedAt)
+        (queued.phase === "recovery" ||
+            !job ||
+            job.id !== queued.jobId ||
+            job.startedAt < queued.jobStartedAt)
     ) {
         const waiting = createBoundaryJob({
             sessionId: sessionID,
@@ -78,11 +81,17 @@ export function queuedBoundaryJob(
                 contextLimit: queued.contextLimit,
             },
         })
-        waiting.currentStage = "Queued until the assistant's turn ends"
-        waiting.logs = [
-            "Queued; will compact when the assistant's current turn completes " +
-                "(falls back to session idle if the completion event is missed).",
-        ]
+        waiting.currentStage =
+            queued.phase === "recovery"
+                ? "Interrupted compaction queued to resume"
+                : "Queued until the assistant's turn ends"
+        waiting.logs =
+            queued.phase === "recovery"
+                ? ["Interrupted compaction will resume at the next safe turn boundary."]
+                : [
+                      "Queued; will compact when the assistant's current turn completes " +
+                          "(falls back to session idle if the completion event is missed).",
+                  ]
         waiting.updatedAt = Math.max(waiting.updatedAt, queued.requestedAt)
         return waiting
     }

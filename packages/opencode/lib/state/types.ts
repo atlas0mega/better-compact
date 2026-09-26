@@ -73,6 +73,8 @@ export interface BoundaryState {
     /** Manual request waiting for the next completed assistant turn (idle and next-user-turn are fallbacks). */
     queuedManual?: {
         requestedAt: number
+        /** Durable in-flight intent; recovery is only retried at a safe turn boundary. */
+        phase?: "running" | "recovery"
         jobId?: string
         jobStartedAt?: number
         lastUserMessageId?: string

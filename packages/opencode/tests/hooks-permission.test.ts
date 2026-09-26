@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import type { PluginConfig } from "../lib/config"
 import { archiveBoundaryDelta, loadArchiveCatalog } from "../lib/boundary/archive-catalog"
 import { boundaryRangeHash } from "../lib/boundary/fingerprint"
+import { createBoundaryJob } from "../lib/boundary/progress"
 import { openCodeCodec } from "../lib/codec"
 import {
     buildBoundaryContextPlan,
@@ -239,6 +240,24 @@ test("chat message transform drops messages without info instead of crashing", a
 
     assert.equal(runtime.peek("session-1"), undefined)
     assert.equal(output.messages.length, 0)
+})
+
+test("a state-load failure leaves the provider request untouched", async () => {
+    const sessionID = `ses-state-unavailable-${Date.now()}`
+    const client = transformClient(100_000)
+    const runtime = createRuntimeState(client, new Logger(false))
+    runtime.prepare = async () => {
+        throw new Error("state unavailable")
+    }
+    const messages = buildOverTriggerConversation(sessionID)
+    const original = structuredClone(messages)
+    await transformHandler(
+        client,
+        runtime,
+        buildConfig("allow"),
+        mkdtempSync(join(tmpdir(), "better-compact-state-fallback-")),
+    )({}, { messages })
+    assert.deepEqual(messages, original)
 })
 
 function buildOverTriggerConversation(sessionId: string): WithParts[] {
@@ -516,6 +535,31 @@ test("a revised archived result below trigger cannot send unpruned history or ch
     assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
 })
 
+test("a transient failed replan retries once in the held request and preserves the next prefix", async () => {
+    const sessionID = `ses-replay-retry-${Date.now()}`
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
+    const client = transformClient(100_000)
+    const runtime = createRuntimeState(client, new Logger(false))
+    const originalStart = runtime.startCompaction
+    let attempts = 0
+    runtime.startCompaction = (id, operation) =>
+        originalStart(id, async () => {
+            attempts++
+            if (attempts === 1) throw new Error("transient replan failure")
+            await operation()
+        })
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-retry-"))
+    const handler = transformHandler(client, runtime, buildConfig("allow"), directory)
+    const first = { messages: structuredClone(messages) }
+    await handler({}, first)
+    assert.equal(attempts, 2)
+    assert.ok(first.messages.some((item) => item.info.id.startsWith("msg_better_compact_")))
+    const next = { messages: structuredClone(messages) }
+    await handler({}, next)
+    assert.equal(attempts, 2, "a committed plan is not rebuilt on the next request")
+    assert.deepEqual(next.messages, first.messages)
+})
+
 test("a saved manual plan is repaired when its source changes even with automatic compaction off", async () => {
     const sessionID = `ses-manual-repair-${Date.now()}`
     const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
@@ -592,7 +636,7 @@ test("accounting updates in an archived turn reuse the same provider-bound prefi
     assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
 })
 
-test("a non-replayable saved plan cannot silently pass raw history when no new boundary fits", async () => {
+test("a non-replayable saved plan reports fallback but allows the request when no boundary fits", async () => {
     const sessionID = `ses-invalid-no-boundary-${Date.now()}`
     const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
     const client = transformClient(100_000)
@@ -607,29 +651,32 @@ test("a non-replayable saved plan cannot silently pass raw history when no new b
     const lastAssistant = revised[0]
     lastAssistant.info.tokens!.total = 3_300
     lastAssistant.info.tokens!.input = 3_299
-    await assert.rejects(
-        transformHandler(client, runtime, config, directory)({}, { messages: revised }),
-        /could not restore its saved context/,
-    )
+    const originalStart = runtime.startCompaction
+    let attempts = 0
+    runtime.startCompaction = (id, operation) => {
+        attempts++
+        return originalStart(id, operation)
+    }
+    const native = structuredClone(revised)
+    await transformHandler(client, runtime, config, directory)({}, { messages: revised })
+    assert.deepEqual(revised, native, "fallback preserves native history")
     assert.equal(runtime.get(sessionID).boundary.automaticCheck?.reason, "replay_invalid")
+    assert.equal(attempts, 1, "a deterministic invalid replay is rebuilt only once")
 })
 
-test("an irreducible oversized user turn stops the provider request", async () => {
+test("an irreducible oversized user turn is reported without blocking the provider request", async () => {
     const sessionID = `ses-irreducible-${Date.now()}`
     const messages = [
         buildUserMessage("giant-user", "Current instruction ".repeat(8_000), 1, sessionID),
     ]
     const client = transformClient(10_000)
     const runtime = createRuntimeState(client, new Logger(false))
-    await assert.rejects(
-        transformHandler(
-            client,
-            runtime,
-            buildConfig("allow"),
-            mkdtempSync(join(tmpdir(), "better-compact-irreducible-")),
-        )({}, { messages }),
-        /provider request was stopped/,
-    )
+    await transformHandler(
+        client,
+        runtime,
+        buildConfig("allow"),
+        mkdtempSync(join(tmpdir(), "better-compact-irreducible-")),
+    )({}, { messages })
     assert.equal(runtime.get(sessionID).boundary.automaticCheck?.reason, "overflow_unresolved")
 })
 
@@ -1661,6 +1708,209 @@ test("manual request during a busy turn waits until idle and runs once", async (
     assert.equal(reports.length, 1)
 })
 
+test("a restart resumes only an uncommitted manual job at idle", async () => {
+    const sessionID = `ses-recover-uncommitted-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionID)
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-recover-uncommitted-"))
+    const client = {
+        ...transformClient(50_000),
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+        },
+    }
+    const logger = new Logger(false)
+    const original = createRuntimeState(client, logger)
+    const state = await original.prepare(sessionID, messages)
+    state.modelContextLimit = 50_000
+    const job = createBoundaryJob({ sessionId: sessionID })
+    state.boundary.job = job
+    state.boundary.queuedManual = {
+        requestedAt: job.startedAt,
+        phase: "running",
+        jobId: job.id,
+        jobStartedAt: job.startedAt,
+        lastUserMessageId: getLastUserMessage(messages)?.info.id,
+    }
+    await saveSessionState(state, logger)
+
+    const resumed = createRuntimeState(client, logger)
+    const event = createEventHandler(
+        resumed,
+        logger,
+        client,
+        profileEscalationConfig(false, 10),
+        directory,
+        {
+            global: undefined,
+            agents: {},
+        },
+    )
+    await event({ event: { type: "session.idle", properties: { sessionID } } })
+    const recovered = resumed.get(sessionID)
+    assert.equal(recovered.boundary.queuedManual, undefined)
+    assert.equal(recovered.boundary.job?.status, "completed")
+    assert.ok(recovered.boundary.activePlan)
+    assert.equal(recovered.boundary.activePlan.contextLimit, 50_000)
+    const snapshot = structuredClone(recovered.boundary.activePlan)
+    await event({ event: { type: "session.idle", properties: { sessionID } } })
+    assert.deepEqual(recovered.boundary.activePlan, snapshot, "the completed job never reruns")
+})
+
+test("a recovered job waits for its real model limit instead of guessing a new budget", async () => {
+    const sessionID = `ses-recover-model-limit-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionID)
+    let providerReady = false
+    const client = {
+        ...transformClient(50_000),
+        provider: {
+            list: async () =>
+                providerReady
+                    ? [
+                          {
+                              id: "anthropic",
+                              models: { "claude-test": { limit: { context: 50_000 } } },
+                          },
+                      ]
+                    : [],
+        },
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+        },
+    }
+    const logger = new Logger(false)
+    const original = createRuntimeState(client, logger)
+    const state = await original.prepare(sessionID, messages)
+    const job = createBoundaryJob({ sessionId: sessionID })
+    state.boundary.job = job
+    state.boundary.queuedManual = {
+        requestedAt: job.startedAt,
+        phase: "running",
+        jobId: job.id,
+        jobStartedAt: job.startedAt,
+    }
+    await saveSessionState(state, logger)
+
+    const resumed = createRuntimeState(client, logger)
+    const event = createEventHandler(
+        resumed,
+        logger,
+        client,
+        profileEscalationConfig(false, 10),
+        mkdtempSync(join(tmpdir(), "better-compact-recover-limit-")),
+        { global: undefined, agents: {} },
+    )
+    await event({ event: { type: "session.idle", properties: { sessionID } } })
+    assert.equal(resumed.get(sessionID).boundary.queuedManual?.phase, "recovery")
+    assert.equal(resumed.get(sessionID).boundary.activePlan, null)
+    providerReady = true
+    await event({ event: { type: "session.idle", properties: { sessionID } } })
+    assert.equal(resumed.get(sessionID).boundary.queuedManual, undefined)
+    assert.equal(resumed.get(sessionID).boundary.activePlan?.contextLimit, 50_000)
+})
+
+test("a restart after plan commit keeps the exact prefix without repeating manual work", async () => {
+    const sessionID = `ses-recover-committed-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionID)
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-recover-committed-"))
+    const client = {
+        ...transformClient(50_000),
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+        },
+    }
+    const logger = new Logger(false)
+    const original = createRuntimeState(client, logger)
+    const state = await original.prepare(sessionID, messages)
+    state.modelContextLimit = 50_000
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 50_000,
+        force: true,
+        targetTokens: 9_000,
+        prefixSummaryAllowed: false,
+    })
+    assert.ok(plan)
+    storeBoundaryPlan(state, plan, messages)
+    const job = createBoundaryJob({ sessionId: sessionID })
+    job.stages.find((stage) => stage.id === "store")!.status = "completed"
+    state.boundary.job = job
+    state.boundary.queuedManual = {
+        requestedAt: job.startedAt,
+        phase: "running",
+        jobId: job.id,
+        jobStartedAt: job.startedAt,
+    }
+    await saveSessionState(state, logger)
+
+    const resumed = createRuntimeState(client, logger)
+    const recovered = await resumed.prepare(sessionID, messages)
+    assert.equal(recovered.boundary.queuedManual, undefined)
+    assert.equal(recovered.boundary.job?.status, "completed")
+    assert.equal(
+        JSON.stringify(recovered.boundary.activePlan),
+        JSON.stringify(state.boundary.activePlan),
+    )
+    const config = buildConfig("allow")
+    config.compaction.automatic = false
+    const handler = transformHandler(client, resumed, config, directory)
+    const first = { messages: structuredClone(messages) }
+    const second = { messages: structuredClone(messages) }
+    await handler({}, first)
+    await handler({}, second)
+    assert.deepEqual(first.messages, second.messages)
+    assert.ok(first.messages.some((item) => item.info.id.startsWith("msg_better_compact_")))
+})
+
+test("a recovered manual request skips work when a newer sufficient plan already replays", async () => {
+    const sessionID = `ses-recover-covered-${Date.now()}`
+    const messages = buildProfileEscalationConversation(sessionID)
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-recover-covered-"))
+    const client = {
+        ...transformClient(50_000),
+        session: {
+            get: async () => ({ data: { parentID: null } }),
+            messages: async () => ({ data: messages }),
+        },
+    }
+    const logger = new Logger(false)
+    const runtime = createRuntimeState(client, logger)
+    const state = await runtime.prepare(sessionID, messages)
+    state.modelContextLimit = 50_000
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 50_000,
+        force: true,
+        targetTokens: 9_000,
+        prefixSummaryAllowed: false,
+    })
+    assert.ok(plan)
+    storeBoundaryPlan(state, plan, messages)
+    const saved = structuredClone(state.boundary.activePlan)
+    const job = createBoundaryJob({ sessionId: sessionID })
+    job.status = "failed"
+    state.boundary.job = job
+    state.boundary.queuedManual = {
+        requestedAt: saved!.createdAt - 1,
+        phase: "recovery",
+        jobId: job.id,
+        jobStartedAt: job.startedAt,
+    }
+    await saveSessionState(state, logger)
+
+    const resumed = createRuntimeState(client, logger)
+    const config = buildConfig("allow")
+    config.compaction.automatic = false
+    await createEventHandler(resumed, logger, client, config, directory, {
+        global: undefined,
+        agents: {},
+    })({ event: { type: "session.idle", properties: { sessionID } } })
+    const recovered = resumed.get(sessionID)
+    assert.equal(recovered.boundary.queuedManual, undefined)
+    assert.equal(recovered.boundary.job?.currentStage, "Recovered existing Better Compact plan")
+    assert.equal(JSON.stringify(recovered.boundary.activePlan), JSON.stringify(saved))
+})
+
 test("manual compaction consumes its provider reading so idle cannot compact it again", async () => {
     const sessionID = `ses-manual-once-${Date.now()}`
     const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 40_000)
@@ -2233,7 +2483,7 @@ test("automatic compaction replaces an active plan after another over-trigger tu
     assert.equal(state.boundary.activePlan?.rawTailStartMessageId, "user-4")
 })
 
-test("a failed transcript write stops an overflowing provider request", async () => {
+test("a failed transcript write does not strand an overflowing provider request", async () => {
     const sessionId = `ses-transform-guard-${Date.now()}`
     const messages = withProviderUsage(buildOverTriggerConversation(sessionId), 9_000)
     const client = transformClient(10_000)
@@ -2248,17 +2498,24 @@ test("a failed transcript write stops an overflowing provider request", async ()
     const output = { messages }
 
     await finishAutoTurn(client, runtime, config, brokenDirectory, messages, sessionId)
-    await assert.rejects(handler({}, output), /provider request was stopped/)
+    await handler({}, output)
 
     assert.ok(!messages.some((item) => item.info.id.startsWith("msg_better_compact_context_")))
     assert.ok(messages.some((item) => item.parts.some((part) => part.type === "tool")))
+    assert.equal(runtime.get(sessionId).boundary.automaticCheck?.reason, "overflow_unresolved")
 })
 
-test("a required compaction failure below the hard limit never sends raw archived history", async () => {
+test("a required compaction failure below the hard limit lets the task continue", async () => {
     const sessionID = `ses-transform-fail-closed-${Date.now()}`
     const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
     const client = transformClient(100_000)
     const runtime = createRuntimeState(client, new Logger(false))
+    const originalStart = runtime.startCompaction
+    let attempts = 0
+    runtime.startCompaction = (id, operation) => {
+        attempts++
+        return originalStart(id, operation)
+    }
     const brokenDirectory = join(
         mkdtempSync(join(tmpdir(), "better-compact-fail-closed-")),
         "not-a-directory",
@@ -2266,8 +2523,10 @@ test("a required compaction failure below the hard limit never sends raw archive
     writeFileSync(brokenDirectory, "regular file blocking mkdir")
     const handler = transformHandler(client, runtime, buildConfig("allow"), brokenDirectory)
     assert.ok(openCodeCodec.estimateTurns(openCodeCodec.encode(messages)) < 100_000)
-    await assert.rejects(handler({}, { messages }), /provider request was stopped/)
+    await handler({}, { messages })
     assert.ok(!messages.some((item) => item.info.id.startsWith("msg_better_compact_")))
+    assert.equal(runtime.get(sessionID).boundary.automaticCheck?.reason, "engine_error")
+    assert.equal(attempts, 2, "only one retry is allowed within a request")
 })
 
 test("compaction failure diagnostics never echo provider prompts or private paths", async () => {
@@ -2398,7 +2657,7 @@ test("better-compact stores virtual plan and reports progress without native sum
     )
 
     await handler({ command: "better-compact", sessionID: "session-1", arguments: "" }, output)
-    await waitFor(() => state.boundary.job?.status === "completed")
+    await runtime.activeCompaction("session-1")
 
     assert.equal(summarizeCalls, 0)
     assert.equal(output.parts.length, 0)
@@ -2539,7 +2798,7 @@ test("chat message sentinel runs better-compact as no-reply TUI action", async (
             ],
         },
     )
-    await waitFor(() => state.boundary.job?.status === "completed")
+    await runtime.activeCompaction("session-1")
 
     assert.ok(state.boundary.activePlan)
     assert.equal(state.boundary.activePlan?.sessionId, "session-1")
