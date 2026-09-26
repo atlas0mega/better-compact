@@ -70,13 +70,12 @@ export interface BoundaryPlanSnapshot extends PlanSnapshot {
 export interface BoundaryState {
     job: BoundaryJobProgress | null
     activePlan: BoundaryPlanSnapshot | null
-    /** Manual request waiting for the next completed assistant/tool step or idle. */
+    /** Manual request waiting for the next completed assistant turn (idle and next-user-turn are fallbacks). */
     queuedManual?: {
         requestedAt: number
         jobId?: string
         jobStartedAt?: number
         lastUserMessageId?: string
-        lastEligibleFingerprint?: string
         params?: {
             providerId: string | undefined
             modelId: string | undefined

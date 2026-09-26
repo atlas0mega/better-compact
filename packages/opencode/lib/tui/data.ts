@@ -78,8 +78,11 @@ export function queuedBoundaryJob(
                 contextLimit: queued.contextLimit,
             },
         })
-        waiting.currentStage = "Queued until the active turn finishes"
-        waiting.logs = ["Queued; waiting for an eligible assistant/tool step or session idle."]
+        waiting.currentStage = "Queued until the assistant's turn ends"
+        waiting.logs = [
+            "Queued; will compact when the assistant's current turn completes " +
+                "(falls back to session idle if the completion event is missed).",
+        ]
         waiting.updatedAt = Math.max(waiting.updatedAt, queued.requestedAt)
         return waiting
     }
@@ -99,7 +102,13 @@ export function currentContextUsage(
     const messages = api.state.session.messages(sessionID)
     const last = [...messages]
         .reverse()
-        .find((message: any) => message.role === "assistant" && message.tokens?.output > 0) as any
+        .find(
+            (message: any) =>
+                message.role === "assistant" &&
+                (message.tokens?.total > 0 ||
+                    message.tokens?.output > 0 ||
+                    message.tokens?.reasoning > 0),
+        ) as any
     const active = activeSessionModel(api, sessionID)
     if (!last && !active) return { tokens: 0, limit: 0 }
     const tokens =

@@ -1,6 +1,7 @@
 import type { SessionState, WithParts } from "./types"
 import type { Logger } from "../logger"
 import { loadSessionState, saveSessionState } from "./persistence"
+import { failBoundaryJob } from "../boundary/progress"
 import {
     isSubAgentSession,
     findLastCompactionTimestamp,
@@ -75,4 +76,13 @@ export async function initializeSessionState(
     state.boundary.queuedManual = persisted.boundary?.queuedManual
     state.boundary.lastIdleUsageMessageId = persisted.boundary?.lastIdleUsageMessageId
     state.boundary.lastPlannedUsageMessageId = persisted.boundary?.lastPlannedUsageMessageId
+    // No in-memory compaction Promise survives a plugin/process restart. Keep
+    // any committed plan, but do not present an orphaned job as still running.
+    if (state.boundary.job?.status === "running") {
+        failBoundaryJob(
+            state,
+            "Interrupted by OpenCode restart; run Better Compact again if needed.",
+        )
+        await saveSessionState(state, logger)
+    }
 }

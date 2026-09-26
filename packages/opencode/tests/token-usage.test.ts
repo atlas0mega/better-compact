@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { createSessionState, type WithParts } from "../lib/state"
-import { getCurrentTokenUsage } from "../lib/token-utils"
+import { getCurrentTokenUsage, getCurrentUsageMessageId } from "../lib/token-utils"
 
 function textPart(messageID: string, sessionID: string, id: string, text: string) {
     return {
@@ -159,4 +159,35 @@ test("getCurrentTokenUsage prefers the provider total", () => {
     ]
 
     assert.equal(getCurrentTokenUsage(state, messages), 90_000)
+})
+
+test("reasoning-only responses use the latest provider total instead of an older output", () => {
+    const state = createSessionState("ses-reasoning-only")
+    const messages = [
+        {
+            info: {
+                id: "old-visible",
+                sessionID: "ses-reasoning-only",
+                role: "assistant",
+                time: { created: 1 },
+                tokens: { total: 3_000, input: 2_999, output: 1, reasoning: 0 },
+            } as WithParts["info"],
+            parts: [],
+        },
+        {
+            info: {
+                id: "latest-reasoning",
+                sessionID: "ses-reasoning-only",
+                role: "assistant",
+                time: { created: 2 },
+                tokens: { total: 90_000, input: 10_000, output: 0, reasoning: 80_000 },
+            } as WithParts["info"],
+            parts: [],
+        },
+    ]
+    assert.equal(getCurrentTokenUsage(state, messages), 90_000)
+    assert.equal(getCurrentUsageMessageId(state, messages), "latest-reasoning")
+    state.lastCompaction = 3
+    assert.equal(getCurrentTokenUsage(state, messages), 0)
+    assert.equal(getCurrentUsageMessageId(state, messages), undefined)
 })

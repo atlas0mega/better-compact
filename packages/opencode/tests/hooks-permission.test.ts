@@ -7,7 +7,11 @@ import type { PluginConfig } from "../lib/config"
 import { archiveBoundaryDelta, loadArchiveCatalog } from "../lib/boundary/archive-catalog"
 import { boundaryRangeHash } from "../lib/boundary/fingerprint"
 import { openCodeCodec } from "../lib/codec"
-import { buildBoundaryContextPlan, processBoundaryTransform } from "../lib/boundary"
+import {
+    buildBoundaryContextPlan,
+    processBoundaryTransform,
+    storeBoundaryPlan,
+} from "../lib/boundary"
 import {
     createChatMessageHandler,
     createChatMessageTransformHandler,
@@ -512,6 +516,29 @@ test("a revised archived result below trigger cannot send unpruned history or ch
     assert.equal(state.boundary.automaticCheck?.reason, "plan_replayed")
 })
 
+test("a saved manual plan is repaired when its source changes even with automatic compaction off", async () => {
+    const sessionID = `ses-manual-repair-${Date.now()}`
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
+    const client = transformClient(100_000)
+    const runtime = createRuntimeState(client, new Logger(false))
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-manual-repair-"))
+    await finishAutoTurn(client, runtime, buildConfig("allow"), directory, messages, sessionID)
+    assert.ok(runtime.get(sessionID).boundary.activePlan)
+
+    const revised = structuredClone(messages)
+    const tool = revised[1].parts[0] as any
+    tool.state.output = `${tool.state.output} New source content.`
+    const config = buildConfig("allow")
+    config.compaction.automatic = false
+    const handler = transformHandler(client, runtime, config, directory)
+    const first = { messages: structuredClone(revised) }
+    await handler({}, first)
+    assert.ok(first.messages.some((message) => message.info.id.startsWith("msg_better_compact_")))
+    const next = { messages: structuredClone(revised) }
+    await handler({}, next)
+    assert.deepEqual(next.messages, first.messages)
+})
+
 test("accounting updates in an archived turn reuse the same provider-bound prefix", async () => {
     const sessionID = `ses-accounting-replay-${Date.now()}`
     const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
@@ -551,10 +578,7 @@ test("accounting updates in an archived turn reuse the same provider-bound prefi
     state.boundary.activePlan = {
         ...saved,
         prefixFingerprintVersion: undefined,
-        prefixFingerprint: boundaryRangeHash(
-            messages.slice(0, saved.compactedMessageCount),
-            1,
-        ),
+        prefixFingerprint: boundaryRangeHash(messages.slice(0, saved.compactedMessageCount), 1),
     }
     const legacy = { messages: structuredClone(messages) }
     await handler({}, legacy)
@@ -1398,6 +1422,27 @@ test("assistant/tool turn compacts at idle before the next provider request with
     assert.equal(output.messages.at(-1)?.info.id, "assistant-3")
 })
 
+test("idle compaction triggers on OpenCode reasoning-only usage", async () => {
+    const sessionID = `ses-reasoning-idle-${Date.now()}`
+    const client = transformClient(100_000)
+    const runtime = createRuntimeState(client, new Logger(false))
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
+    const assistant = messages.findLast((message) => message.info.role === "assistant")!
+    assistant.info.tokens!.output = 0
+    assistant.info.tokens!.reasoning = 80_000
+    assistant.info.tokens!.input = 10_000
+    await finishAutoTurn(
+        client,
+        runtime,
+        buildConfig("allow"),
+        mkdtempSync(join(tmpdir(), "better-compact-reasoning-idle-")),
+        messages,
+        sessionID,
+    )
+    assert.ok(runtime.get(sessionID).boundary.activePlan)
+    assert.equal(runtime.get(sessionID).boundary.lastPlannedUsageMessageId, assistant.info.id)
+})
+
 test("a validated live handoff keeps first-archive wording before the provider request", async () => {
     const sessionID = `ses-pre-provider-handoff-${Date.now()}`
     const directory = mkdtempSync(join(tmpdir(), "better-compact-pre-provider-handoff-"))
@@ -1651,14 +1696,10 @@ test("manual compaction consumes its provider reading so idle cannot compact it 
     const runtime = createRuntimeState(client, logger)
     const state = runtime.get(sessionID)
     state.modelContextLimit = 50_000
-    await createCommandExecuteHandler(
-        client,
-        runtime,
-        logger,
-        config,
-        directory,
-        { global: undefined, agents: {} },
-    )({ command: "better-compact", sessionID, arguments: "compress" }, { parts: [] })
+    await createCommandExecuteHandler(client, runtime, logger, config, directory, {
+        global: undefined,
+        agents: {},
+    })({ command: "better-compact", sessionID, arguments: "compress" }, { parts: [] })
     await runtime.activeCompaction(sessionID)
     assert.ok(state.boundary.activePlan)
     assert.equal(state.boundary.lastPlannedUsageMessageId, "assistant-2")
@@ -1836,19 +1877,76 @@ test("a queued manual compaction runs before the next user turn's provider reque
     assert.equal(reports, 0, "pre-request execution must not append another user prompt")
 })
 
-test("a busy manual request waits for new tool output and runs before the same user turn continues", async () => {
-    const sessionID = `ses-tool-queue-${Date.now()}`
+test("a below-trigger provider request waits for a background manual plan and reuses its prefix", async () => {
+    const sessionID = `ses-manual-wait-${Date.now()}`
     const messages = buildProfileEscalationConversation(sessionID)
+    const directory = mkdtempSync(join(tmpdir(), "better-compact-manual-wait-"))
+    const config = buildConfig("allow")
+    config.compaction.automatic = false
+    const client = transformClient(50_000)
+    const logger = new Logger(false)
+    const runtime = createRuntimeState(client, logger)
+    runtime.setModelLimit("anthropic", "claude-test", 50_000)
+    const state = await runtime.prepare(sessionID, messages)
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 50_000,
+        force: true,
+        targetTokens: 9_000,
+        prefixSummaryAllowed: false,
+    })
+    assert.ok(plan)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+        release = resolve
+    })
+    assert.equal(
+        runtime.startCompaction(sessionID, async () => {
+            await gate
+            storeBoundaryPlan(state, plan, messages)
+        }),
+        true,
+    )
+
+    const handler = transformHandler(client, runtime, config, directory)
+    const first = { messages: structuredClone(messages) }
+    let finished = false
+    const request = handler({}, first).then(() => {
+        finished = true
+    })
+    try {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        assert.equal(finished, false, "OpenCode must not send while manual compaction is active")
+        assert.equal(state.boundary.activePlan, null)
+    } finally {
+        release()
+    }
+    await request
+    assert.ok(first.messages.some((message) => message.info.id.startsWith("msg_better_compact_")))
+    const next = { messages: structuredClone(messages) }
+    await handler({}, next)
+    assert.deepEqual(
+        next.messages,
+        first.messages,
+        "the completed plan must reuse one provider prefix",
+    )
+})
+
+test("a busy manual request waits for the assistant's turn to end, not a mid-turn step boundary", async () => {
+    const sessionID = `ses-tool-queue-${Date.now()}`
+    let messages = buildProfileEscalationConversation(sessionID)
     const directory = mkdtempSync(join(tmpdir(), "better-compact-tool-queue-"))
     const config = profileEscalationConfig(false, 10)
+    let reports = 0
+    const toasts: unknown[] = []
     const client = {
-        ...transformClient(50_000),
+        ...transformClient(50_000, toasts),
         session: {
             status: async () => ({ data: { [sessionID]: { type: "busy" } } }),
             get: async () => ({ data: { parentID: null } }),
             messages: async () => ({ data: messages }),
             prompt: async () => {
-                throw new Error("No nested prompt during an agent loop")
+                reports++
+                return { data: true }
             },
         },
     }
@@ -1877,6 +1975,7 @@ test("a busy manual request waits for new tool output and runs before the same u
         },
     )
     const state = runtime.get(sessionID)
+    assert.ok(state.boundary.queuedManual)
     const handler = createChatMessageTransformHandler(
         client,
         runtime,
@@ -1885,6 +1984,7 @@ test("a busy manual request waits for new tool output and runs before the same u
         permissions,
         directory,
     )
+    const eventHandler = createEventHandler(runtime, logger, client, config, directory, permissions)
     await handler({}, { messages: structuredClone(messages) })
     assert.ok(
         state.boundary.queuedManual,
@@ -1892,18 +1992,101 @@ test("a busy manual request waits for new tool output and runs before the same u
     )
     assert.equal(state.boundary.activePlan, null)
 
+    // Mid-turn step boundary: the same user turn continues with new assistant
+    // tool output. The queue must NOT flush here — compaction belongs to the
+    // end of the assistant's turn, not to the next step's provider request.
     const progressed = [
         ...messages,
         buildAssistantToolMessage("assistant-tool-finished", 100, undefined, sessionID),
     ]
-    const output = { messages: structuredClone(progressed) }
-    await handler({}, output)
+    messages = progressed
+    await handler({}, { messages: structuredClone(progressed) })
+    assert.ok(state.boundary.queuedManual, "a mid-turn step boundary must not compact")
+    assert.equal(state.boundary.activePlan, null)
+    assert.equal(reports, 0)
+
+    // A completion that predates the request (the request landed between
+    // steps) must not consume the queue.
+    await eventHandler({
+        event: {
+            type: "message.updated",
+            properties: {
+                sessionID,
+                info: {
+                    id: "stale-assistant",
+                    role: "assistant",
+                    time: { created: 1, completed: 2 },
+                },
+            },
+        },
+    })
+    assert.ok(state.boundary.queuedManual, "a stale completion must not consume the queue")
+
+    // User message completions never end an assistant turn.
+    await eventHandler({
+        event: {
+            type: "message.updated",
+            properties: {
+                sessionID,
+                info: { id: "user-latest", role: "user", time: { created: 1, completed: 3 } },
+            },
+        },
+    })
+    assert.ok(state.boundary.queuedManual, "a user message completion must not compact")
+
+    // OpenCode marks a tool-call step completed before the SAME turn's next
+    // provider request. Even a provider reporting "stop" with tool calls
+    // must not flush this queue.
+    for (const finish of ["tool-calls", "stop"]) {
+        await eventHandler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id: "assistant-tool-finished",
+                        sessionID,
+                        role: "assistant",
+                        finish,
+                        time: { created: 100, completed: Date.now() + 1000 },
+                    },
+                },
+            },
+        })
+        assert.ok(state.boundary.queuedManual, `a ${finish} tool step must not compact`)
+        assert.equal(state.boundary.activePlan, null)
+    }
+
+    const final = buildMessage("assistant-turn-finished", "assistant", "Final answer")
+    final.info.sessionID = sessionID
+    final.info.time.created = 101
+    for (const part of final.parts) part.sessionID = sessionID
+    messages = [...progressed, final]
+    // The assistant's terminal step completes after the request: flush once.
+    await eventHandler({
+        event: {
+            type: "message.updated",
+            properties: {
+                info: {
+                    id: "assistant-turn-finished",
+                    sessionID,
+                    role: "assistant",
+                    finish: "stop",
+                    time: { created: 100, completed: Date.now() + 5000 },
+                },
+            },
+        },
+    })
     assert.equal(state.boundary.queuedManual, undefined)
     assert.ok(state.boundary.activePlan)
+    // No observed chat variant: the final report publishes as a toast, not a
+    // nested no-reply prompt.
+    assert.equal(reports, 0)
+    assert.ok(toasts.some((toast) => JSON.stringify(toast).includes("Better Compact")))
+
+    const output = { messages: structuredClone(messages) }
+    await handler({}, output)
+    assert.equal(reports, 0, "the same request must run once")
     assert.ok(output.messages.some((message) => message.info.id.startsWith("msg_better_compact_")))
-    assert.equal(getLastUserMessage(progressed)?.info.id, getLastUserMessage(messages)?.info.id)
-    await handler({}, { messages: structuredClone(progressed) })
-    assert.equal(state.boundary.queuedManual, undefined, "the same request must run once")
 })
 
 test("automatic hook uses exact model budgets and falls back for other models", async () => {
@@ -2069,6 +2252,22 @@ test("a failed transcript write stops an overflowing provider request", async ()
 
     assert.ok(!messages.some((item) => item.info.id.startsWith("msg_better_compact_context_")))
     assert.ok(messages.some((item) => item.parts.some((part) => part.type === "tool")))
+})
+
+test("a required compaction failure below the hard limit never sends raw archived history", async () => {
+    const sessionID = `ses-transform-fail-closed-${Date.now()}`
+    const messages = withProviderUsage(buildOverTriggerConversation(sessionID), 90_000)
+    const client = transformClient(100_000)
+    const runtime = createRuntimeState(client, new Logger(false))
+    const brokenDirectory = join(
+        mkdtempSync(join(tmpdir(), "better-compact-fail-closed-")),
+        "not-a-directory",
+    )
+    writeFileSync(brokenDirectory, "regular file blocking mkdir")
+    const handler = transformHandler(client, runtime, buildConfig("allow"), brokenDirectory)
+    assert.ok(openCodeCodec.estimateTurns(openCodeCodec.encode(messages)) < 100_000)
+    await assert.rejects(handler({}, { messages }), /provider request was stopped/)
+    assert.ok(!messages.some((item) => item.info.id.startsWith("msg_better_compact_")))
 })
 
 test("compaction failure diagnostics never echo provider prompts or private paths", async () => {
@@ -2430,8 +2629,17 @@ test("text complete strips hallucinated metadata tags", async () => {
 
 function buildForkFixture(sessionID: string): { messages: WithParts[]; prefix: WithParts[] } {
     const messages = [
-        buildUserMessage(`${sessionID}-user-1`, `shared fork prefix for ${sessionID}`, 1, sessionID),
-        buildMessage(`${sessionID}-assistant-1`, "assistant", `shared fork answer for ${sessionID}`),
+        buildUserMessage(
+            `${sessionID}-user-1`,
+            `shared fork prefix for ${sessionID}`,
+            1,
+            sessionID,
+        ),
+        buildMessage(
+            `${sessionID}-assistant-1`,
+            "assistant",
+            `shared fork answer for ${sessionID}`,
+        ),
         buildUserMessage(`${sessionID}-user-2`, "fork raw tail", 3, sessionID),
         buildUserMessage(`${sessionID}-user-3`, "fork latest", 5, sessionID),
     ]
@@ -2480,7 +2688,11 @@ async function persistForkSourcePlan(directory: string, prefix: WithParts[]): Pr
         plan: {
             sessionId: source.sessionId!,
             rangeHash: "fork-source-range",
-            transcript: { relativePath: transcriptRelativePath, content: "", messageIds: owned.map((m) => m.info.id) },
+            transcript: {
+                relativePath: transcriptRelativePath,
+                content: "",
+                messageIds: owned.map((m) => m.info.id),
+            },
         } as any,
         originalMessages: owned,
     })
@@ -2504,8 +2716,12 @@ test("fork plan inheritance is skipped when compress permission is deny", async 
             get: async ({ path }: { path: { id: string } }) => ({
                 data: {
                     parentID: null,
-                    title: path.id === allowSession ? "Tracked project (fork #1)" :
-                        path.id === allowSourceId ? "Tracked project" : "Independent session",
+                    title:
+                        path.id === allowSession
+                            ? "Tracked project (fork #1)"
+                            : path.id === allowSourceId
+                              ? "Tracked project"
+                              : "Independent session",
                 },
             }),
         },
@@ -2537,7 +2753,10 @@ test("fork plan inheritance is skipped when compress permission is deny", async 
         buildConfig("allow"),
         directory,
     )({}, { messages: unrelatedMessages })
-    assert.deepEqual((await loadArchiveCatalog(directory, unrelatedSession)).inheritedLinks ?? [], [])
+    assert.deepEqual(
+        (await loadArchiveCatalog(directory, unrelatedSession)).inheritedLinks ?? [],
+        [],
+    )
 
     // Same fixtures, permission deny: inheritance must not even happen.
     const denyClient = {
@@ -2546,8 +2765,12 @@ test("fork plan inheritance is skipped when compress permission is deny", async 
             get: async ({ path }: { path: { id: string } }) => ({
                 data: {
                     parentID: null,
-                    title: path.id === denySession ? "Denied project (fork #1)" :
-                        path.id === denySourceId ? "Denied project" : "Independent session",
+                    title:
+                        path.id === denySession
+                            ? "Denied project (fork #1)"
+                            : path.id === denySourceId
+                              ? "Denied project"
+                              : "Independent session",
                 },
             }),
         },

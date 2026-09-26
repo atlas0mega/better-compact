@@ -50,11 +50,9 @@ import {
     summarizePendingArchiveDescriptions,
 } from "./boundary/archive-summarizer"
 import { PREFIX_CHUNK_VERSION, retainArchivedUserText } from "./boundary/engine"
-import { boundaryRangeHash } from "./boundary/fingerprint"
 import { getCurrentParams, getCurrentTokenUsage, getCurrentUsageMessageId } from "./token-utils"
 import { sendIgnoredMessage } from "./ui/notification"
-import { getLastUserMessage, isIgnoredUserMessage } from "./messages/query"
-import { isSyndicatePluginInjection } from "./messages/injection"
+import { getLastUserMessage } from "./messages/query"
 
 /** Exceptions from the provider or filesystem may embed private prompt text. */
 export function safeCompactionFailure(error: unknown): string {
@@ -66,14 +64,6 @@ export function safeCompactionFailure(error: unknown): string {
     )
         return message
     return "unexpected_error"
-}
-
-function queuedStepFingerprint(messages: WithParts[]): string {
-    return boundaryRangeHash(
-        messages.filter(
-            (message) => !isIgnoredUserMessage(message) && !isSyndicatePluginInjection(message),
-        ),
-    )
 }
 
 async function sessionIsBusy(client: any, sessionId: string): Promise<boolean> {
@@ -114,7 +104,6 @@ async function queueManualIfBusy(
         jobId,
         jobStartedAt,
         lastUserMessageId: getLastUserMessage(messages)?.info.id,
-        lastEligibleFingerprint: queuedStepFingerprint(messages),
         params,
         ...overrides,
     }
@@ -221,6 +210,12 @@ export function createChatMessageTransformHandler(
             return
         }
 
+        // Manual jobs launched from the command/TUI hooks run independently of
+        // OpenCode's provider loop. The transform is the last gate before that
+        // loop sends its request: do not read/replay a plan while such a job is
+        // still changing it, even when automatic planning is below trigger.
+        const pendingCompaction = runtime.activeCompaction(sessionId)
+        if (pendingCompaction) await pendingCompaction
         const state = await runtime.prepare(sessionId, messages)
         const archiveCatalog = await expireArchives(workingDirectory, sessionId).catch((error) => {
             logger.warn("Could not expire Better Compact archives before request", {
@@ -229,6 +224,10 @@ export function createChatMessageTransformHandler(
             })
             return null
         })
+        // A job can start while prepare/catalog I/O is in progress. Wait for
+        // its committed plan before reading or updating the saved snapshot.
+        const concurrentCompaction = runtime.activeCompaction(sessionId)
+        if (concurrentCompaction) await concurrentCompaction
         if (
             archiveCatalog &&
             state.boundary.activePlan &&
@@ -243,12 +242,14 @@ export function createChatMessageTransformHandler(
             await saveSessionState(state, logger)
         }
         const queued = state.boundary.queuedManual
-        if (
-            queued &&
-            (getLastUserMessage(messages)?.info.id !== queued.lastUserMessageId ||
-                (queued.lastEligibleFingerprint !== undefined &&
-                    queuedStepFingerprint(messages) !== queued.lastEligibleFingerprint))
-        ) {
+        // A queued manual compaction belongs to the end of the assistant's
+        // current turn: the message.updated handler flushes it there and
+        // session.idle is the fallback. This pre-request path is the
+        // last-resort fallback for a missed idle, so it only fires when a
+        // genuinely NEW user turn starts. Transcript growth with the same
+        // last user message is the current turn continuing and must not
+        // compact mid-turn.
+        if (queued && getLastUserMessage(messages)?.info.id !== queued.lastUserMessageId) {
             syncCompressPermissionState(state, currentConfig, hostPermissions, messages)
             if (
                 compressPermission(state, currentConfig) === "allow" &&
@@ -267,10 +268,13 @@ export function createChatMessageTransformHandler(
                         beforeRequest: true,
                     })
                 } catch (error) {
-                    logger.warn("Queued Better Compact failed before request; continuing safely", {
+                    logger.warn("Queued Better Compact failed before request; stopping request", {
                         sessionId,
                         error: error instanceof Error ? error.name : "unknown",
                     })
+                    throw new Error(
+                        "Better Compact could not finish the queued compaction; the provider request was stopped.",
+                    )
                 }
             } else {
                 state.boundary.queuedManual = undefined
@@ -377,17 +381,16 @@ export function createChatMessageTransformHandler(
                 cached.collapsePercent !== profile.collapsePercent)
         const outgoingEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
         const needsPreRequestPlan =
-            currentConfig.compaction.automatic &&
             effectivePermission === "allow" &&
-            contextLimit > 0 &&
-            // Provider usage is the ordinary trigger. A request estimated to
-            // exceed the model window or a stale-policy plan must be settled
-            // before the next provider request, without lowering the trigger.
             (invalidCachedReplay ||
-                policyChanged ||
-                (providerTokens >= triggerTokens &&
-                    usageMessageId !== state.boundary.lastPlannedUsageMessageId) ||
-                outgoingEstimate >= contextLimit)
+                (currentConfig.compaction.automatic &&
+                    contextLimit > 0 &&
+                    // Provider usage is the ordinary trigger. A stale-policy
+                    // plan or hard overflow must be settled before the request.
+                    (policyChanged ||
+                        (providerTokens >= triggerTokens &&
+                            usageMessageId !== state.boundary.lastPlannedUsageMessageId) ||
+                        outgoingEstimate >= contextLimit)))
         let outcome = replayed
             ? "plan_replayed"
             : effectivePermission === "deny"
@@ -400,6 +403,11 @@ export function createChatMessageTransformHandler(
                     ? "awaiting_idle"
                     : "automatic_off"
         if (needsPreRequestPlan) {
+            if (contextLimit <= 0) {
+                throw new Error(
+                    "Better Compact cannot restore its saved context without a model limit; the provider request was stopped.",
+                )
+            }
             if (originalMessages) messages.splice(0, messages.length, ...originalMessages)
             outcome = await runAutomaticTransform({
                 client,
@@ -437,6 +445,11 @@ export function createChatMessageTransformHandler(
                     "Better Compact could not restore its saved context after the session history changed; the provider request was stopped.",
                 )
             }
+            if (outcome === "engine_error" || outcome === "replay_invalid") {
+                throw new Error(
+                    "Better Compact could not complete its required compaction; the provider request was stopped.",
+                )
+            }
             const finalEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
             if (finalEstimate >= contextLimit) {
                 await recordAutomaticCheck(
@@ -469,7 +482,7 @@ export function createChatMessageTransformHandler(
 
 // One automatic compaction at a time per session: the winner builds and
 // commits the plan; a concurrent transform waits and replays the committed
-// plan onto its own request. Any failure degrades to an unpruned request.
+// plan onto its own request. The caller stops provider work if it fails.
 async function runAutomaticTransform(input: {
     client: any
     runtime: RuntimeState
@@ -1763,14 +1776,8 @@ export function createEventHandler(
                     (state.isSubAgent && !currentConfig.experimental.allowSubAgents)
                 )
                     return
-                const usageMessage = [...messages]
-                    .reverse()
-                    .find(
-                        (message) =>
-                            message.info.role === "assistant" &&
-                            (message.info.tokens?.output ?? 0) > 0,
-                    )
-                if (!usageMessage || usageMessage.info.id === state.boundary.lastIdleUsageMessageId)
+                const usageMessageId = getCurrentUsageMessageId(state, messages)
+                if (!usageMessageId || usageMessageId === state.boundary.lastIdleUsageMessageId)
                     return
                 const providerTokens = getCurrentTokenUsage(state, messages)
                 const params = getCurrentParams(state, messages, logger)
@@ -1800,7 +1807,7 @@ export function createEventHandler(
                 const trigger =
                     resolved.compaction.triggerTokens ??
                     Math.floor((contextLimit * profile.triggerPercent) / 100)
-                state.boundary.lastIdleUsageMessageId = usageMessage.info.id
+                state.boundary.lastIdleUsageMessageId = usageMessageId
                 if (providerTokens < trigger) {
                     await recordAutomaticCheck(
                         state,
@@ -1862,6 +1869,85 @@ export function createEventHandler(
         if (input.event.type === "session.deleted") {
             const sessionId = input.event.properties?.info?.id
             if (typeof sessionId === "string") runtime.evict(sessionId)
+        }
+
+        if (
+            input.event.type === "message.updated" &&
+            client &&
+            config &&
+            directory &&
+            hostPermissions
+        ) {
+            const sessionId =
+                input.event.properties?.sessionID ?? input.event.properties?.info?.sessionID
+            if (typeof sessionId !== "string" || runtime.isScratch(sessionId)) return
+            // OpenCode stamps time.completed at the end of EVERY assistant
+            // step, including tool-call steps followed by another provider
+            // request. Only a terminal finish can end the turn here; idle is
+            // the fallback for errors/cancellation and ambiguous finishes.
+            const info = input.event.properties?.info
+            if (!info || typeof info !== "object" || info.role !== "assistant") return
+            const completedAt = info.time?.completed
+            if (typeof completedAt !== "number" || !Number.isFinite(completedAt)) return
+            if (typeof info.finish !== "string" || ["tool-calls", "unknown"].includes(info.finish))
+                return
+            const queued = runtime.peek(sessionId)?.boundary.queuedManual
+            if (!queued) return
+            // The completed turn must postdate the request. When the request
+            // lands between steps, the just-finished message is already
+            // stale; the queue must wait for the NEXT assistant turn to end.
+            if (completedAt < queued.requestedAt) return
+            try {
+                const response = await client.session.messages({ path: { id: sessionId } })
+                const messages = filterMessages(response.data ?? response)
+                // Some providers report a terminal finish even with tool
+                // calls. The host will continue those turns; never compact a
+                // prefix which is still growing with their results.
+                const completed = messages.find((message) => message.info.id === info.id)
+                if (!completed || completed.info.role !== "assistant") return
+                if (
+                    completed.parts.some(
+                        (part) =>
+                            part.type === "tool" &&
+                            !(part as any).metadata?.providerExecuted &&
+                            !(
+                                part.state.status === "error" &&
+                                part.state.metadata?.interrupted === true
+                            ),
+                    )
+                )
+                    return
+                const state = await runtime.prepare(sessionId, messages)
+                if (!state.boundary.queuedManual) return
+                await expireArchives(directory, sessionId)
+                const currentConfig = loadConfig()
+                syncCompressPermissionState(state, currentConfig, hostPermissions, messages)
+                if (
+                    compressPermission(state, currentConfig) !== "allow" ||
+                    (state.isSubAgent && !currentConfig.experimental.allowSubAgents)
+                ) {
+                    state.boundary.queuedManual = undefined
+                    await saveSessionState(state, logger)
+                    return
+                }
+                await runQueuedManual({
+                    client,
+                    runtime,
+                    state,
+                    logger,
+                    config: currentConfig,
+                    directory,
+                    sessionId,
+                    messages,
+                    beforeRequest: false,
+                })
+            } catch (error) {
+                logger.warn("Better Compact could not run at assistant turn end", {
+                    sessionId,
+                    error: error instanceof Error ? error.name : "unknown",
+                })
+            }
+            return
         }
     }
 }
