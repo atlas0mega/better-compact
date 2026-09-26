@@ -1057,6 +1057,7 @@
         }
       ],
       "createdAt": 0,
+      "reasoningMetadataPriced": true,
       "prefixFingerprintVersion": 2,
       "prefixFingerprint": "337e9dd7150ca790",
       "compactedMessageCount": 2
@@ -2292,6 +2293,7 @@
         }
       ],
       "createdAt": 0,
+      "reasoningMetadataPriced": true,
       "prefixFingerprintVersion": 2,
       "prefixFingerprint": "337e9dd7150ca790",
       "compactedMessageCount": 2
@@ -3173,6 +3175,7 @@
         }
       ],
       "createdAt": 0,
+      "reasoningMetadataPriced": true,
       "prefixFingerprintVersion": 2,
       "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
@@ -5193,6 +5196,7 @@
         }
       ],
       "createdAt": 0,
+      "reasoningMetadataPriced": true,
       "prefixFingerprintVersion": 2,
       "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
@@ -6074,6 +6078,7 @@
         }
       ],
       "createdAt": 0,
+      "reasoningMetadataPriced": true,
       "prefixFingerprintVersion": 2,
       "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
@@ -7000,6 +7005,7 @@
         }
       ],
       "createdAt": 0,
+      "reasoningMetadataPriced": true,
       "prefixFingerprintVersion": 2,
       "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
@@ -7947,6 +7953,7 @@
         }
       ],
       "createdAt": 0,
+      "reasoningMetadataPriced": true,
       "prefixFingerprintVersion": 2,
       "prefixFingerprint": "204d5d0c9295a976",
       "compactedMessageCount": 5
@@ -8508,7 +8515,7 @@
       "sessionId": "ses_golden_boundary",
       "rangeHash": "9dbf72ae381489f5",
       "contextLimit": 4000,
-      "beforeTokens": 5107,
+      "beforeTokens": 8115,
       "afterPruneTokens": 5322,
       "overheadTokens": 0,
       "triggerTokens": 3400,
@@ -8541,8 +8548,8 @@
         {
           "name": "skills",
           "label": "Pruned loaded skills",
-          "beforeTokens": 5107,
-          "afterTokens": 5107,
+          "beforeTokens": 8115,
+          "afterTokens": 8115,
           "clearedTokens": 0,
           "changedMessages": 0,
           "changedParts": 0,
@@ -8551,8 +8558,8 @@
         {
           "name": "supersede-reads",
           "label": "Superseded repeated tool reads",
-          "beforeTokens": 5107,
-          "afterTokens": 5107,
+          "beforeTokens": 8115,
+          "afterTokens": 8115,
           "clearedTokens": 0,
           "changedMessages": 0,
           "changedParts": 0,
@@ -8561,8 +8568,8 @@
         {
           "name": "purge-error-inputs",
           "label": "Purged stale failed tool inputs",
-          "beforeTokens": 5107,
-          "afterTokens": 5107,
+          "beforeTokens": 8115,
+          "afterTokens": 8115,
           "clearedTokens": 0,
           "changedMessages": 0,
           "changedParts": 0,
@@ -8571,9 +8578,9 @@
         {
           "name": "tools-old",
           "label": "Pruned old tool calls/results",
-          "beforeTokens": 5107,
-          "afterTokens": 5037,
-          "clearedTokens": 70,
+          "beforeTokens": 8115,
+          "afterTokens": 8044,
+          "clearedTokens": 71,
           "changedMessages": 1,
           "changedParts": 3,
           "status": "applied"
@@ -8581,9 +8588,9 @@
         {
           "name": "reasoning",
           "label": "Pruned thinking tokens",
-          "beforeTokens": 5037,
+          "beforeTokens": 8044,
           "afterTokens": 5037,
-          "clearedTokens": 0,
+          "clearedTokens": 3007,
           "changedMessages": 1,
           "changedParts": 1,
           "status": "applied"
@@ -8772,14 +8779,14 @@
         ]
       }
     ],
-    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before    5.1K / 4K      [██████████████████] 128%\n  Now       5.3K / 4K      [██████████████████] 133% projected\n\n  Reduced 0 (0%) projected\n  Target 1.2K; 4.1K still above target\n  Largest retained components: other retained content ~4.8K, handoff/reference and archive catalog ~449, recent raw tail ~38\n  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most 0. Exact history remains in the private archive.\n\n  Actions\n  ✓ Pruned old tool calls/results          -70\n  ✓ Pruned thinking tokens                 applied (no net savings)\n  - Last-resort prefix summary             increased +34\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/9dbf72ae381489f5.md\n  4 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
+    "report": "╭─────────────────────────────────────────────────────────────────────────╮\n│                       Better Compact Complete                          │\n╰─────────────────────────────────────────────────────────────────────────╯\n\n  Context window\n  Before    8.1K / 4K      [██████████████████] 203%\n  Now       5.3K / 4K      [██████████████████] 133% projected\n\n  Reduced 2.8K (34%) projected\n  Target 1.2K; 4.1K still above target\n  Largest retained components: other retained content ~4.8K, handoff/reference and archive catalog ~449, recent raw tail ~38\n  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most 0. Exact history remains in the private archive.\n\n  Actions\n  ✓ Pruned old tool calls/results          -71\n  ✓ Pruned thinking tokens                 -3K\n  - Last-resort prefix summary             increased +34\n\n  Reference\n  .opencode/better-compact/sessions/ses_golden_boundary/9dbf72ae381489f5.md\n  4 archived messages; raw tail starts at msg-user-3\n\n  Note: Now is Better Compact's projected active-history size. OpenCode's footer\n  updates after the next provider response and also includes system/tool schemas,\n  cache accounting, output, reasoning, and provider overhead.",
     "snapshot": {
       "sessionId": "ses_golden_boundary",
       "rangeHash": "9dbf72ae381489f5",
       "contextLimit": 4000,
       "rawTailStartMessageId": "msg-user-3",
       "transcriptRelativePath": ".opencode/better-compact/sessions/ses_golden_boundary/9dbf72ae381489f5.md",
-      "beforeTokens": 5107,
+      "beforeTokens": 8115,
       "afterPruneTokens": 5322,
       "residual": {
         "rawTailTokens": 38,
@@ -8810,8 +8817,8 @@
         {
           "name": "skills",
           "label": "Pruned loaded skills",
-          "beforeTokens": 5107,
-          "afterTokens": 5107,
+          "beforeTokens": 8115,
+          "afterTokens": 8115,
           "clearedTokens": 0,
           "changedMessages": 0,
           "changedParts": 0,
@@ -8820,8 +8827,8 @@
         {
           "name": "supersede-reads",
           "label": "Superseded repeated tool reads",
-          "beforeTokens": 5107,
-          "afterTokens": 5107,
+          "beforeTokens": 8115,
+          "afterTokens": 8115,
           "clearedTokens": 0,
           "changedMessages": 0,
           "changedParts": 0,
@@ -8830,8 +8837,8 @@
         {
           "name": "purge-error-inputs",
           "label": "Purged stale failed tool inputs",
-          "beforeTokens": 5107,
-          "afterTokens": 5107,
+          "beforeTokens": 8115,
+          "afterTokens": 8115,
           "clearedTokens": 0,
           "changedMessages": 0,
           "changedParts": 0,
@@ -8840,9 +8847,9 @@
         {
           "name": "tools-old",
           "label": "Pruned old tool calls/results",
-          "beforeTokens": 5107,
-          "afterTokens": 5037,
-          "clearedTokens": 70,
+          "beforeTokens": 8115,
+          "afterTokens": 8044,
+          "clearedTokens": 71,
           "changedMessages": 1,
           "changedParts": 3,
           "status": "applied"
@@ -8850,9 +8857,9 @@
         {
           "name": "reasoning",
           "label": "Pruned thinking tokens",
-          "beforeTokens": 5037,
+          "beforeTokens": 8044,
           "afterTokens": 5037,
-          "clearedTokens": 0,
+          "clearedTokens": 3007,
           "changedMessages": 1,
           "changedParts": 1,
           "status": "applied"
@@ -8889,6 +8896,7 @@
         }
       ],
       "createdAt": 0,
+      "reasoningMetadataPriced": true,
       "prefixFingerprintVersion": 2,
       "prefixFingerprint": "3de8cd6fe3f115c5",
       "compactedMessageCount": 4

@@ -9,6 +9,7 @@ import { boundaryRangeHash } from "../lib/boundary/fingerprint"
 import { createBoundaryJob } from "../lib/boundary/progress"
 import { openCodeCodec } from "../lib/codec"
 import {
+    applyBoundaryPlanSnapshot,
     buildBoundaryContextPlan,
     processBoundaryTransform,
     storeBoundaryPlan,
@@ -581,6 +582,106 @@ test("a saved manual plan is repaired when its source changes even with automati
     const next = { messages: structuredClone(revised) }
     await handler({}, next)
     assert.deepEqual(next.messages, first.messages)
+})
+
+test("a legacy plan reprices hidden OpenAI reasoning once below the provider trigger", async () => {
+    const sessionID = `ses-opaque-reprice-${Date.now()}`
+    const oldUser = buildUserMessage("old-user", "Original task", 1, sessionID)
+    const currentUser = buildUserMessage("current-user", "Continue", 20, sessionID)
+    Object.assign(oldUser.info, { model: { providerID: "openai", modelID: "gpt-6-astra" } })
+    Object.assign(currentUser.info, { model: { providerID: "openai", modelID: "gpt-6-astra" } })
+    const messages: WithParts[] = [oldUser]
+    for (let index = 0; index < 12; index++) {
+        const id = `old-assistant-${index}`
+        const item = buildMessage(id, "assistant", `Progress ${index}`)
+        Object.assign(item.info, {
+            sessionID,
+            time: { created: index + 2 },
+            providerID: "openai",
+            modelID: "gpt-6-astra",
+        })
+        item.parts[0].sessionID = sessionID
+        item.parts.push({
+            id: `${id}-reasoning`,
+            messageID: id,
+            sessionID,
+            type: "reasoning",
+            text: "",
+            metadata: {
+                openai: {
+                    itemId: `rsn_${index}`,
+                    reasoningEncryptedContent: "QUJD".repeat(5_000),
+                },
+            },
+        })
+        if (index === 0)
+            item.parts.push({
+                id: `${id}-tool`,
+                messageID: id,
+                sessionID,
+                type: "tool",
+                callID: `${id}-call`,
+                tool: "read",
+                state: {
+                    status: "completed",
+                    input: {},
+                    output: "old output ".repeat(30_000),
+                    title: "read",
+                    metadata: {},
+                    time: { start: 1, end: 2 },
+                },
+            })
+        messages.push(item)
+    }
+    messages.push(currentUser)
+    const legacy = buildBoundaryContextPlan(messages, {
+        contextLimit: 120_000,
+        targetTokens: 80_000,
+        force: true,
+        minTailUserTurns: 1,
+        recentAssistantOutputs: 5,
+        recentToolResultBudgetTokens: 40_000,
+        prefixSummaryAllowed: false,
+        collapsePercent: 25,
+    })
+    assert.ok(legacy)
+    const client = {
+        ...transformClient(120_000),
+        provider: {
+            list: async () => [
+                { id: "openai", models: { "gpt-6-astra": { limit: { context: 120_000 } } } },
+            ],
+        },
+    }
+    const runtime = createRuntimeState(client, new Logger(false))
+    const state = await runtime.prepare(sessionID, messages)
+    state.modelContextLimit = 120_000
+    storeBoundaryPlan(state, legacy, messages)
+    const snapshot = state.boundary.activePlan!
+    snapshot.reasoningMetadataPriced = undefined
+    snapshot.targetTokens = 15_000
+    const oldRequest = structuredClone(messages)
+    assert.ok(applyBoundaryPlanSnapshot(oldRequest, snapshot, { allowRegrown: true }))
+    const oldCount = oldRequest.flatMap((m) => m.parts).filter((p) => p.type === "reasoning").length
+    const config = buildConfig("allow")
+    config.compaction.targetTokens = 15_000
+    config.compaction.triggerTokens = snapshot.triggerTokens
+    const handler = transformHandler(
+        client,
+        runtime,
+        config,
+        mkdtempSync(join(tmpdir(), "better-compact-opaque-reprice-")),
+    )
+    const first = { messages: structuredClone(messages) }
+    await handler({}, first)
+    const newCount = first.messages
+        .flatMap((m) => m.parts)
+        .filter((p) => p.type === "reasoning").length
+    assert.ok(newCount < oldCount)
+    assert.equal(state.boundary.activePlan?.reasoningMetadataPriced, true)
+    const second = { messages: structuredClone(messages) }
+    await handler({}, second)
+    assert.deepEqual(second.messages, first.messages, "replaying a repriced plan is byte-stable")
 })
 
 test("accounting updates in an archived turn reuse the same provider-bound prefix", async () => {

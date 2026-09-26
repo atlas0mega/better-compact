@@ -11,7 +11,12 @@ import {
 import type { PluginConfig } from "../config"
 import type { Logger } from "../logger"
 import { openCodeCodec, openCodeConventions, openCodeSpec, sessionKeyOf } from "../codec"
-import { saveSessionState, type SessionState, type WithParts } from "../state"
+import {
+    saveSessionState,
+    type BoundaryPlanSnapshot,
+    type SessionState,
+    type WithParts,
+} from "../state"
 import { boundaryRangeHash, boundarySnapshotHash, PREFIX_FINGERPRINT_VERSION } from "./fingerprint"
 import { isSyndicatePluginInjection } from "../messages/injection"
 import { createTranscriptStore } from "./transcripts"
@@ -51,6 +56,7 @@ export async function processBoundaryTransform(input: {
     providerReportedTokens?: number
     forceOverflow?: boolean
     forceInvalidReplay?: boolean
+    forceMetadataReprice?: boolean
     onOutcome?: (outcome: "planned" | "replayed" | "unchanged") => void
     summariesAllowed?: boolean
     summarize?: (jobs: BoundarySummaryJob[]) => Promise<Record<string, string>>
@@ -100,20 +106,24 @@ export async function processBoundaryTransform(input: {
             save: async (_sessionKey, snapshot) => {
                 const previous = input.state.boundary.activePlan
                 input.state.boundary.activePlan = snapshot
-                    ? stampForkIdentity(
-                          {
-                              ...snapshot,
-                              ...(prefixChunkAttempted ||
-                              (oldPlan?.rangeHash === snapshot.rangeHash && currentPrefixAttempt)
-                                  ? {
-                                        prefixChunkAttempted: true as const,
-                                        prefixChunkVersion: PREFIX_CHUNK_VERSION,
-                                        prefixChunkModel,
-                                    }
-                                  : {}),
-                          },
-                          input.messages,
-                      )
+                    ? {
+                          ...stampForkIdentity(
+                              {
+                                  ...snapshot,
+                                  ...(prefixChunkAttempted ||
+                                  (oldPlan?.rangeHash === snapshot.rangeHash &&
+                                      currentPrefixAttempt)
+                                      ? {
+                                            prefixChunkAttempted: true as const,
+                                            prefixChunkVersion: PREFIX_CHUNK_VERSION,
+                                            prefixChunkModel,
+                                        }
+                                      : {}),
+                              },
+                              input.messages,
+                          ),
+                          reasoningMetadataPriced: true as const,
+                      }
                     : null
                 try {
                     await saveSessionState(input.state, input.logger)
@@ -185,6 +195,7 @@ export async function processBoundaryTransform(input: {
         oldPlan &&
         contextLimit > 0 &&
         !input.forceOverflow &&
+        !input.forceMetadataReprice &&
         (input.providerReportedTokens ?? 0) < triggerTokens &&
         !changedArchivedPrefix &&
         !migratePluginInjections &&
@@ -409,6 +420,7 @@ export async function processBoundaryTransform(input: {
         force:
             input.forceOverflow === true ||
             input.forceInvalidReplay === true ||
+            input.forceMetadataReprice === true ||
             migrationHandoff !== undefined ||
             changedArchivedPrefix ||
             migratePluginInjections ||
@@ -479,7 +491,7 @@ export function retainArchivedUserText(
     return `${handoff.slice(0, boundary)}\n${missing.map((text) => `- ${text}`).join("\n")}\n${handoff.slice(boundary + 1)}`
 }
 
-function stampForkIdentity(snapshot: PlanSnapshot, messages: WithParts[]) {
+function stampForkIdentity(snapshot: PlanSnapshot, messages: WithParts[]): BoundaryPlanSnapshot {
     const tagged = messages.some(isSyndicatePluginInjection)
         ? { ...snapshot, pluginInjectionPruning: true as const }
         : snapshot

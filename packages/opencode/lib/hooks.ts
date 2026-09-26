@@ -34,6 +34,7 @@ import {
     type BoundaryContextPlan,
 } from "./boundary"
 import { openCodeCodec } from "./codec"
+import { hasOpenAIEncryptedReasoning } from "./context-estimate"
 import {
     archiveBoundaryDelta,
     archiveOversizedSummary,
@@ -470,6 +471,12 @@ export function createChatMessageTransformHandler(
             Math.floor((contextLimit * profile.targetPercent) / 100)
         const cached = state.boundary.activePlan
         const invalidCachedReplay = !!cached && !replayed
+        const outgoingEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
+        const legacyUnpricedReasoning =
+            !!cached &&
+            cached.reasoningMetadataPriced !== true &&
+            hasOpenAIEncryptedReasoning(messages) &&
+            outgoingEstimate > targetTokens
         const policyChanged =
             !!cached &&
             (cached.contextLimit !== contextLimit ||
@@ -478,8 +485,8 @@ export function createChatMessageTransformHandler(
                 cached.recentReasoningBudgetTokens !== profile.recentReasoningTokens ||
                 cached.recentAssistantOutputs !== 5 ||
                 cached.prefixSummaryAllowed !== profile.prefixSummary ||
-                cached.collapsePercent !== profile.collapsePercent)
-        const outgoingEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
+                cached.collapsePercent !== profile.collapsePercent ||
+                legacyUnpricedReasoning)
         const needsPreRequestPlan =
             effectivePermission === "allow" &&
             (invalidCachedReplay ||
@@ -520,6 +527,7 @@ export function createChatMessageTransformHandler(
                         params: currentParams,
                         forceOverflow: outgoingEstimate >= contextLimit,
                         forceInvalidReplay: invalidCachedReplay,
+                        forceMetadataReprice: legacyUnpricedReasoning,
                     })
                 const restore = () =>
                     messages.splice(0, messages.length, ...structuredClone(source))
@@ -605,6 +613,7 @@ async function runAutomaticTransform(input: {
     params: ReturnType<typeof getCurrentParams>
     forceOverflow?: boolean
     forceInvalidReplay?: boolean
+    forceMetadataReprice?: boolean
 }): Promise<string> {
     try {
         const usageMessageId = getCurrentUsageMessageId(input.state, input.messages)
@@ -621,6 +630,7 @@ async function runAutomaticTransform(input: {
                 providerReportedTokens: getCurrentTokenUsage(input.state, input.messages),
                 forceOverflow: input.forceOverflow,
                 forceInvalidReplay: input.forceInvalidReplay,
+                forceMetadataReprice: input.forceMetadataReprice,
                 onOutcome: (outcome) => {
                     replayed = outcome === "replayed"
                 },

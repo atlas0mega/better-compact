@@ -114,6 +114,57 @@ test("local plan size prices fresh tool results without inventing a provider ove
     assert.equal(plan.afterPruneTokens, openCodeCodec.estimateTurns(openCodeCodec.encode(outgoing)))
 })
 
+test("planning prunes older encrypted OpenAI reasoning after tool pruning", () => {
+    const encrypted = "QUJD".repeat(5_000)
+    const messages: WithParts[] = [
+        message("old-user", "user", [textPart("old-user", "Old task")], 1),
+        ...Array.from({ length: 12 }, (_, index) => {
+            const id = `old-assistant-${index}`
+            const assistant = message(
+                id,
+                "assistant",
+                [
+                    textPart(id, `Progress ${index}`),
+                    {
+                        id: `${id}-reasoning`,
+                        messageID: id,
+                        sessionID,
+                        type: "reasoning",
+                        text: "",
+                        metadata: {
+                            openai: {
+                                itemId: `rsn_${index}`,
+                                reasoningEncryptedContent: encrypted,
+                            },
+                        },
+                    },
+                ],
+                index + 2,
+            )
+            Object.assign(assistant.info, { providerID: "openai", modelID: "gpt-6-astra" })
+            return assistant
+        }),
+        message("current-user", "user", [textPart("current-user", "Continue the task")], 14),
+    ]
+    const originalReasoning = messages.flatMap((m) => m.parts).filter((p) => p.type === "reasoning")
+    const plan = buildBoundaryContextPlan(messages, {
+        contextLimit: 120_000,
+        targetTokens: 15_000,
+        force: true,
+        recentAssistantOutputs: 5,
+        recentReasoningBudgetTokens: 2_500,
+        prefixSummaryAllowed: false,
+        minTailUserTurns: 1,
+    })
+    assert.ok(plan)
+    const output = structuredClone(messages)
+    assert.ok(applyBoundaryPlanSnapshot(output, toBoundaryPlanSnapshot(plan, messages)))
+    const retainedReasoning = output.flatMap((m) => m.parts).filter((p) => p.type === "reasoning")
+    assert.ok(retainedReasoning.length < originalReasoning.length)
+    assert.ok(plan.stages.some((stage) => stage.name === "reasoning" && stage.status !== "skipped"))
+    assert.equal(toBoundaryPlanSnapshot(plan, messages).reasoningMetadataPriced, true)
+})
+
 test("ignored Better Compact messages do not count as protected user turns", () => {
     const messages = [
         message("msg-user-1", "user", [textPart("msg-user-1", "old user")], 1),

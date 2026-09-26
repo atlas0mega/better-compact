@@ -101,8 +101,7 @@ export function toOpenCodeModelLikeMessage(message: WithParts): { role: string; 
         role: message.info.role,
         parts: message.parts.flatMap((part): unknown[] => {
             if (part.type === "text") return [{ type: "text", text: part.text }]
-            if (part.type === "reasoning" && shouldIncludeReasoning(message))
-                return [{ type: "reasoning", text: part.text }]
+            if (part.type === "reasoning") return [toOpenCodeReasoningPart(message, part)]
             if (part.type === "tool") return [toOpenCodeToolPart(part)]
             return []
         }),
@@ -119,8 +118,8 @@ function estimatePart(message: WithParts, part: MessagePart): number {
     if (part.type === "tool") return estimateOpenCodeToolPart(part)
     if (part.type === "text")
         return estimateOpenCodeTokens(JSON.stringify({ type: "text", text: part.text }))
-    if (part.type === "reasoning" && shouldIncludeReasoning(message))
-        return estimateOpenCodeTokens(JSON.stringify({ type: "reasoning", text: part.text }))
+    if (part.type === "reasoning")
+        return estimateOpenCodeTokens(JSON.stringify(toOpenCodeReasoningPart(message, part)))
     return 0
 }
 
@@ -161,7 +160,34 @@ function isBetterCompactReference(message: WithParts): boolean {
     )
 }
 
-function shouldIncludeReasoning(message: WithParts): boolean {
+function toOpenCodeReasoningPart(
+    message: WithParts,
+    part: Extract<MessagePart, { type: "reasoning" }>,
+): { type: "reasoning"; text: string; providerMetadata?: unknown } {
     const providerID = (message.info as any).providerID ?? (message.info as any).model?.providerID
-    return typeof providerID !== "string" || !providerID.includes("openai")
+    return {
+        type: "reasoning",
+        text: part.text,
+        // OpenCode passes opaque OpenAI reasoning items back to the Responses
+        // API even when their human-readable text is hidden. Pricing only the
+        // text made hundreds of kilotokens invisible to the planner.
+        ...(typeof providerID === "string" && providerID.includes("openai") && part.metadata
+            ? { providerMetadata: part.metadata }
+            : {}),
+    }
+}
+
+export function hasOpenAIEncryptedReasoning(messages: WithParts[]): boolean {
+    return messages.some(
+        (message) =>
+            message.info.role === "assistant" &&
+            String(
+                (message.info as any).providerID ?? (message.info as any).model?.providerID ?? "",
+            ).includes("openai") &&
+            message.parts.some(
+                (part) =>
+                    part.type === "reasoning" &&
+                    typeof (part.metadata as any)?.openai?.reasoningEncryptedContent === "string",
+            ),
+    )
 }

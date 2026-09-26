@@ -182,6 +182,7 @@ export function toBoundaryPlanSnapshot(
 ): BoundaryPlanSnapshot {
     const snapshot = {
         ...toPlanSnapshot(plan),
+        reasoningMetadataPriced: true as const,
         ...(messages.some(isSyndicatePluginInjection)
             ? { pluginInjectionPruning: true as const }
             : {}),
