@@ -35,7 +35,7 @@ export function buildPrefixChunks(
             "Return the six Markdown headings in order: " + SUMMARY_SECTION_HEADERS.join("; "),
             "Preserve concrete decisions and WHY, changed paths/symbols, failures, constraints, completed and pending work, and exact errors. Distinguish old from current conclusions.",
             "Do not list every turn or invent facts. The original turns are available in the raw transcript for exact recall.",
-            "Keep the entire structured summary under 4000 characters. Use '- (none)' for an empty section.",
+            `Use '- (none)' for an empty section. The structured result may use up to ${Math.min(50_000, Math.ceil(4_000 * Math.sqrt(Math.max(1, countTokens(lines.join("\n"))) / 1_000)))} characters; synthesize rather than copying the source line by line.`,
             `Raw transcript: ${plan.transcript.relativePath}`,
             "",
             ...lines,

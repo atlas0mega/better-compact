@@ -42,7 +42,12 @@ export function ContextDialog(props: {
     const estimatedTotal = Math.max(0, breakdown.estimatedTotal)
 
     return (
-        <BetterCompactFrame api={props.api} title="Context" eyebrow="Better Compact" onBack={props.onBack}>
+        <BetterCompactFrame
+            api={props.api}
+            title="Context"
+            eyebrow="Better Compact"
+            onBack={props.onBack}
+        >
             <Card theme={theme} title="Reported by OpenCode">
                 <Metric
                     theme={theme}
@@ -54,7 +59,11 @@ export function ContextDialog(props: {
                     label="Estimated history"
                     value={`~${formatTokenCount(breakdown.estimatedTotal)}`}
                 />
-                <Metric theme={theme} label="Unattributed overhead" value={`~${formatTokenCount(breakdown.unattributed)}`} />
+                <Metric
+                    theme={theme}
+                    label="Unattributed overhead"
+                    value={`~${formatTokenCount(breakdown.unattributed)}`}
+                />
             </Card>
             <Card theme={theme} title="Estimated Active History">
                 <Progress
@@ -116,7 +125,12 @@ export function StatsDialog(props: { api: TuiApi; report: StatsReport; onBack: (
 
     if (!report.hasPlan) {
         return (
-            <BetterCompactFrame api={props.api} title="Stats" eyebrow="Better Compact" onBack={props.onBack}>
+            <BetterCompactFrame
+                api={props.api}
+                title="Stats"
+                eyebrow="Better Compact"
+                onBack={props.onBack}
+            >
                 <Card theme={theme} title="No plan yet">
                     <text fg={theme.textMuted}>
                         Run /better-compact to prune historical context for this session.
@@ -129,7 +143,12 @@ export function StatsDialog(props: { api: TuiApi; report: StatsReport; onBack: (
     const appliedStages = report.stages.filter((stage) => stage.clearedTokens > 0)
 
     return (
-        <BetterCompactFrame api={props.api} title="Stats" eyebrow="Better Compact" onBack={props.onBack}>
+        <BetterCompactFrame
+            api={props.api}
+            title="Stats"
+            eyebrow="Better Compact"
+            onBack={props.onBack}
+        >
             <Card theme={theme} title="Active Plan">
                 <Metric theme={theme} label="Status" value={report.status ?? "unknown"} />
                 <Metric
@@ -222,7 +241,11 @@ export function ProgressDialog(props: {
                             <box height={1} flexDirection="row" justifyContent="space-between">
                                 <box flexDirection="row" gap={2} flexGrow={1}>
                                     <text fg={theme.primary} attributes={TextAttributes.BOLD}>
-                                        {props.job.status === "running" ? props.spinner : props.job.status === "failed" ? "×" : "✓"}
+                                        {props.job.status === "running"
+                                            ? props.spinner
+                                            : props.job.status === "failed"
+                                              ? "×"
+                                              : "✓"}
                                     </text>
                                     <text fg={theme.text} attributes={TextAttributes.BOLD}>
                                         {props.job.currentStage}
@@ -239,7 +262,9 @@ export function ProgressDialog(props: {
                                 detail={`${percent()}%`}
                             />
                             <ContextWindowMeters theme={theme} job={props.job} />
-                            {props.job.error ? <text fg={theme.error}>{props.job.error}</text> : null}
+                            {props.job.error ? (
+                                <text fg={theme.error}>{props.job.error}</text>
+                            ) : null}
                         </box>
                     </Card>
 
@@ -256,7 +281,9 @@ export function ProgressDialog(props: {
                             {props.job.logs.slice(-8).map((line) => (
                                 <text fg={theme.textMuted}>{line}</text>
                             ))}
-                            {!props.job.logs.length ? <text fg={theme.textMuted}>No log entries yet.</text> : null}
+                            {!props.job.logs.length ? (
+                                <text fg={theme.textMuted}>No log entries yet.</text>
+                            ) : null}
                         </box>
                     </Card>
                 </box>
@@ -269,21 +296,58 @@ function ContextWindowMeters(props: { theme: Theme; job: BoundaryJobProgress }) 
     const counters = () => props.job.counters
     const limit = () => counters().contextLimit ?? 0
     const before = () => counters().beforeTokens ?? 0
-    const current = () => counters().currentTokens ?? before()
-    const cleared = () => counters().clearedTokens ?? Math.max(0, before() - current())
+    // During synthesis currentTokens is the raw intermediate stage estimate,
+    // not the outgoing request. Show the final-plan preview until it is stored.
+    const projected = () =>
+        props.job.status === "completed"
+            ? (counters().currentTokens ?? counters().afterTokens)
+            : counters().afterTokens
+    const cleared = () => Math.max(0, before() - (projected() ?? before()))
     return (
         <box flexDirection="column" gap={0} paddingTop={1}>
-            <text fg={props.theme.primary} attributes={TextAttributes.BOLD}>Context window</text>
+            <text fg={props.theme.primary} attributes={TextAttributes.BOLD}>
+                Context window
+            </text>
             {limit() > 0 ? (
                 <>
-                    <ContextMeterRow theme={props.theme} label="Provider before" tokens={before()} limit={limit()} color="warning" />
-                    <ContextMeterRow theme={props.theme} label="Estimated now" tokens={current()} limit={limit()} color="primary" />
-                    <box height={1} flexDirection="row" gap={1}>
-                        <box width={16}>
-                            <text fg={props.theme.textMuted}>Estimated saved:</text>
-                        </box>
-                        <text fg={props.theme.success} attributes={TextAttributes.BOLD}>{formatTokenCount(cleared(), true)}</text>
-                    </box>
+                    <ContextMeterRow
+                        theme={props.theme}
+                        label="Provider before"
+                        tokens={before()}
+                        limit={limit()}
+                        color="warning"
+                    />
+                    {projected() !== undefined ? (
+                        <>
+                            <ContextMeterRow
+                                theme={props.theme}
+                                label={
+                                    props.job.status === "completed"
+                                        ? "Applied estimate"
+                                        : "Plan projection"
+                                }
+                                tokens={projected()!}
+                                limit={limit()}
+                                color="primary"
+                            />
+                            <box height={1} flexDirection="row" gap={1}>
+                                <box width={16}>
+                                    <text fg={props.theme.textMuted}>
+                                        {props.job.status === "completed"
+                                            ? "Estimated saved:"
+                                            : "Projected saved:"}
+                                    </text>
+                                </box>
+                                <text fg={props.theme.success} attributes={TextAttributes.BOLD}>
+                                    {formatTokenCount(cleared(), true)}
+                                </text>
+                            </box>
+                        </>
+                    ) : (
+                        <text fg={props.theme.textMuted}>
+                            Waiting for the full plan projection...
+                        </text>
+                    )}
                 </>
             ) : (
                 <box paddingTop={1}>
@@ -294,7 +358,13 @@ function ContextWindowMeters(props: { theme: Theme; job: BoundaryJobProgress }) 
     )
 }
 
-function ContextMeterRow(props: { theme: Theme; label: string; tokens: number; limit: number; color: "primary" | "success" | "warning" }) {
+function ContextMeterRow(props: {
+    theme: Theme
+    label: string
+    tokens: number
+    limit: number
+    color: "primary" | "success" | "warning"
+}) {
     const width = 22
     const ratio = Math.max(0, Math.min(1, props.tokens / Math.max(1, props.limit)))
     const filled = Math.round(ratio * width)
@@ -305,7 +375,9 @@ function ContextMeterRow(props: { theme: Theme; label: string; tokens: number; l
                 <text fg={props.theme.textMuted}>{`${props.label}:`}</text>
             </box>
             <box width={18}>
-                <text fg={props.theme.text}>{`${formatTokenCount(props.tokens, true)} / ${formatTokenCount(props.limit, true)}`}</text>
+                <text
+                    fg={props.theme.text}
+                >{`${formatTokenCount(props.tokens, true)} / ${formatTokenCount(props.limit, true)}`}</text>
             </box>
             <box width={width} flexDirection="row">
                 <text fg={props.theme[props.color]}>{"█".repeat(filled)}</text>
@@ -330,12 +402,19 @@ function StageRow(props: { theme: Theme; stage: BoundaryJobStage; spinning: stri
         if (props.stage.status === "failed") return props.theme.error
         return props.theme.textMuted
     }
-    const detail = () => props.stage.detail ?? (props.stage.clearedTokens ? `-${formatTokenCount(props.stage.clearedTokens)}` : "")
+    const detail = () =>
+        props.stage.detail ??
+        (props.stage.clearedTokens ? `-${formatTokenCount(props.stage.clearedTokens)}` : "")
     return (
         <box flexDirection="column" gap={0} paddingBottom={detail() ? 1 : 0}>
             <box flexDirection="row" gap={2}>
                 <box width={2}>
-                    <text fg={color()} attributes={props.stage.status === "running" ? TextAttributes.BOLD : undefined}>
+                    <text
+                        fg={color()}
+                        attributes={
+                            props.stage.status === "running" ? TextAttributes.BOLD : undefined
+                        }
+                    >
                         {statusText()}
                     </text>
                 </box>
@@ -362,9 +441,9 @@ export function PanelDialog(props: {
 }) {
     const theme = props.api.theme.current
     const dimensions = useTerminalDimensions()
-    const profile = () =>
-        resolveCompactionProfile({ compaction: props.settings }, props.settings)
-    const setPreset = (preset: CompactionPreset) => props.onSettingsChange({ ...props.settings, preset })
+    const profile = () => resolveCompactionProfile({ compaction: props.settings }, props.settings)
+    const setPreset = (preset: CompactionPreset) =>
+        props.onSettingsChange({ ...props.settings, preset })
     const setCustom = (custom: Partial<CompactionConfig["custom"]>) =>
         props.onSettingsChange({
             ...props.settings,
@@ -378,7 +457,12 @@ export function PanelDialog(props: {
             eyebrow="Better Compact"
             maxHeight={dialogMaxHeight(dimensions().height)}
             footer={
-                <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingTop={1}>
+                <box
+                    flexShrink={0}
+                    flexDirection="row"
+                    justifyContent="space-between"
+                    paddingTop={1}
+                >
                     <DialogButton
                         theme={theme}
                         label="cancel"
@@ -511,7 +595,11 @@ export function PanelDialog(props: {
     )
 }
 
-function PresetRow(props: { theme: Theme; current: CompactionPreset; onSelect: (preset: CompactionPreset) => void }) {
+function PresetRow(props: {
+    theme: Theme
+    current: CompactionPreset
+    onSelect: (preset: CompactionPreset) => void
+}) {
     const presets: Array<{ id: CompactionPreset; label: string }> = [
         { id: "light", label: "gentle" },
         { id: "moderate", label: "balanced" },
@@ -528,10 +616,15 @@ function PresetRow(props: { theme: Theme; current: CompactionPreset; onSelect: (
                         justifyContent="center"
                         paddingLeft={1}
                         paddingRight={1}
-                        backgroundColor={selected ? props.theme.primary : props.theme.backgroundElement}
+                        backgroundColor={
+                            selected ? props.theme.primary : props.theme.backgroundElement
+                        }
                         onMouseUp={() => props.onSelect(preset.id)}
                     >
-                        <text fg={selected ? props.theme.selectedListItemText : props.theme.text} attributes={selected ? TextAttributes.BOLD : undefined}>
+                        <text
+                            fg={selected ? props.theme.selectedListItemText : props.theme.text}
+                            attributes={selected ? TextAttributes.BOLD : undefined}
+                        >
                             {preset.label}
                         </text>
                     </box>
@@ -563,7 +656,9 @@ function EffortRow(props: {
                     <box
                         paddingLeft={1}
                         paddingRight={1}
-                        backgroundColor={selected ? props.theme.primary : props.theme.backgroundElement}
+                        backgroundColor={
+                            selected ? props.theme.primary : props.theme.backgroundElement
+                        }
                         onMouseUp={() => available && props.onSelect(effort.id)}
                     >
                         <text
@@ -585,19 +680,16 @@ function EffortRow(props: {
     )
 }
 
-function ToggleRow(props: {
-    theme: Theme
-    label: string
-    enabled: boolean
-    onToggle: () => void
-}) {
+function ToggleRow(props: { theme: Theme; label: string; enabled: boolean; onToggle: () => void }) {
     return (
         <box height={1} flexDirection="row" justifyContent="space-between">
             <text fg={props.theme.text}>{props.label}</text>
             <box
                 paddingLeft={1}
                 paddingRight={1}
-                backgroundColor={props.enabled ? props.theme.success : props.theme.backgroundElement}
+                backgroundColor={
+                    props.enabled ? props.theme.success : props.theme.backgroundElement
+                }
                 onMouseUp={props.onToggle}
             >
                 <text fg={props.enabled ? props.theme.background : props.theme.textMuted}>
@@ -629,7 +721,9 @@ function ToolRetentionRow(props: {
                         <box
                             paddingLeft={1}
                             paddingRight={1}
-                            backgroundColor={selected ? props.theme.primary : props.theme.backgroundElement}
+                            backgroundColor={
+                                selected ? props.theme.primary : props.theme.backgroundElement
+                            }
                             onMouseUp={() => props.onSelect(option.value)}
                         >
                             <text
@@ -658,27 +752,44 @@ function SliderRow(props: {
     onChange: (value: number) => void
 }) {
     const width = 24
-    const ratio = Math.max(0, Math.min(1, (props.value - props.min) / Math.max(1, props.max - props.min)))
+    const ratio = Math.max(
+        0,
+        Math.min(1, (props.value - props.min) / Math.max(1, props.max - props.min)),
+    )
     const filled = Math.round(ratio * width)
-    const display = props.formatter ? props.formatter(props.value) : `${props.value}${props.suffix ?? ""}`
+    const display = props.formatter
+        ? props.formatter(props.value)
+        : `${props.value}${props.suffix ?? ""}`
     const set = (next: number) => props.onChange(Math.max(props.min, Math.min(props.max, next)))
     return (
         <box height={1} flexDirection="row" gap={2} alignItems="center">
             <box width={16}>
                 <text fg={props.theme.text}>{props.label}</text>
             </box>
-            <box paddingLeft={1} paddingRight={1} backgroundColor={props.theme.backgroundElement} onMouseUp={() => set(props.value - props.step)}>
+            <box
+                paddingLeft={1}
+                paddingRight={1}
+                backgroundColor={props.theme.backgroundElement}
+                onMouseUp={() => set(props.value - props.step)}
+            >
                 <text fg={props.theme.text}>-</text>
             </box>
             <box width={width} flexDirection="row">
                 <text fg={props.theme.primary}>{"█".repeat(filled)}</text>
                 <text fg={props.theme.borderSubtle}>{"░".repeat(width - filled)}</text>
             </box>
-            <box paddingLeft={1} paddingRight={1} backgroundColor={props.theme.backgroundElement} onMouseUp={() => set(props.value + props.step)}>
+            <box
+                paddingLeft={1}
+                paddingRight={1}
+                backgroundColor={props.theme.backgroundElement}
+                onMouseUp={() => set(props.value + props.step)}
+            >
                 <text fg={props.theme.text}>+</text>
             </box>
             <box width={12}>
-                <text fg={props.theme.text} attributes={TextAttributes.BOLD}>{display}</text>
+                <text fg={props.theme.text} attributes={TextAttributes.BOLD}>
+                    {display}
+                </text>
             </box>
         </box>
     )

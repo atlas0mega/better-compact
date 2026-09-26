@@ -3,12 +3,29 @@ import type { BoundaryContextPlan } from "@better-compact/core"
 export function formatBoundaryReport(
     plan: BoundaryContextPlan,
     actualCurrentTokens?: number,
+    summaryCalls?: number,
 ): string {
     const before =
         actualCurrentTokens && actualCurrentTokens > 0 ? actualCurrentTokens : plan.beforeTokens
     const now = plan.afterPruneTokens
-    const reduced = Math.max(0, before - now)
-    const reductionPercent = before > 0 ? Math.round((reduced / before) * 100) : 0
+    const rawEstimate = plan.stages[0]?.beforeTokens
+    const sameScale = rawEstimate === undefined || rawEstimate === before
+    const localBefore = rawEstimate ?? before
+    const reduced = Math.max(0, localBefore - now)
+    const reductionPercent = localBefore > 0 ? Math.round((reduced / localBefore) * 100) : 0
+    const residual = plan.residual
+    const retained = residual
+        ? ([
+              ["recent raw tail", residual.rawTailTokens],
+              ["protected reasoning/tools", residual.protectedPartTokens],
+              ["handoff/reference and archive catalog", residual.handoffTokens],
+              ["other retained content", residual.otherTokens],
+          ] as const)
+        : []
+    const largest = [...retained]
+        .filter(([, tokens]) => tokens > 0)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
     const stageRows = plan.stages
         .filter((stage) => stage.status !== "skipped" || stage.clearedTokens > 0)
         .map((stage) => {
@@ -19,14 +36,20 @@ export function formatBoundaryReport(
                     ? "✓"
                     : "-"
             const detail =
-                stage.clearedTokens > 0
-                    ? `-${formatTokenCount(stage.clearedTokens)}`
-                    : stage.status === "applied"
-                      ? "applied (no net savings)"
-                      : stage.status === "failed"
-                        ? "did not reach target"
-                        : "not needed"
-            return `  ${icon} ${stage.label.padEnd(38)} ${detail}`
+                stage.afterTokens > stage.beforeTokens
+                    ? `increased +${formatTokenCount(stage.afterTokens - stage.beforeTokens)}`
+                    : stage.clearedTokens > 0
+                      ? `-${formatTokenCount(stage.clearedTokens)}`
+                      : stage.status === "applied"
+                        ? "applied (no net savings)"
+                        : stage.status === "failed"
+                          ? "did not reach target"
+                          : "not needed"
+            const label =
+                stage.name === "prefix-summary" && summaryCalls === 0
+                    ? "Deterministic prefix fallback"
+                    : stage.label
+            return `  ${icon} ${label.padEnd(38)} ${detail}`
         })
     return [
         "╭─────────────────────────────────────────────────────────────────────────╮",
@@ -37,10 +60,30 @@ export function formatBoundaryReport(
         formatContextWindowLine("Before", before, plan.contextLimit),
         formatContextWindowLine("Now", now, plan.contextLimit, "projected"),
         "",
-        `  Reduced ${formatTokenCount(reduced)} (${reductionPercent}%)`,
+        sameScale
+            ? `  Reduced ${formatTokenCount(reduced)} (${reductionPercent}%) projected`
+            : `  Local history reduced ${formatTokenCount(reduced)} (${reductionPercent}%) estimated; provider savings pending next response`,
+        now > plan.targetTokens
+            ? `  Target ${formatTokenCount(plan.targetTokens)}; ${formatTokenCount(now - plan.targetTokens)} still above target`
+            : undefined,
+        now > plan.targetTokens && largest.length > 0
+            ? `  Largest retained components: ${largest.map(([label, tokens]) => `${label} ~${formatTokenCount(tokens)}`).join(", ")}`
+            : undefined,
+        residual?.overheadTokens
+            ? `  Provider/history gap ~${formatTokenCount(residual.overheadTokens)} = last provider reading ${formatTokenCount(plan.beforeTokens)} - estimated prior-request history ${formatTokenCount(Math.max(0, plan.beforeTokens - residual.overheadTokens))}; not verified fixed host overhead.`
+            : undefined,
+        plan.anchorReasoningLimited
+            ? `  Five-output reasoning span exceeded the safe window; kept outputs and bounded reasoning to at most ${formatTokenCount(plan.recentReasoningBudgetTokens ?? 0)}. Exact history remains in the private archive.`
+            : undefined,
         "",
         "  Actions",
         ...(stageRows.length > 0 ? stageRows : ["  (no stages applied)"]),
+        !sameScale
+            ? `  Stage changes use a ${formatTokenCount(localBefore)} local raw estimate; Before is from the previous provider response, not the same request.`
+            : undefined,
+        summaryCalls !== undefined
+            ? `  Luna calls: ${summaryCalls}. Stage changes are context deltas, not model response sizes.`
+            : undefined,
         "",
         "  Reference",
         `  ${plan.transcript.relativePath}`,

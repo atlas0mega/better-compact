@@ -119,6 +119,23 @@ test("chunk summaries reject oversized output rather than silently truncating fa
     assert.ok(warnings.some((warning) => warning.message.includes("overlong")))
 })
 
+test("a prefix chunk may return more than a single-turn 4000-character limit", async () => {
+    const expanded = validSummary.replace("- Keep the canonical parser.", `- ${"specific decision ".repeat(500)}`)
+    assert.ok(expanded.length > 4_000)
+    const summaries = await createSummaryScheduler(logger([])).summarize({
+        sessionKey: "session-large-prefix-chunk",
+        jobs: [job],
+        summarizer: {
+            complete: async () => expanded,
+            completeBatch: async () => ({ [job.key]: expanded }),
+        },
+        maxCalls: 1,
+        rejectOversized: true,
+        maxSummaryChars: 16_000,
+    })
+    assert.equal(summaries[job.key], expanded)
+})
+
 test("summary scheduler rejects a too-short response", async () => {
     const warnings: Array<{ message: string; data: unknown }> = []
     const scheduler = createSummaryScheduler(logger(warnings))

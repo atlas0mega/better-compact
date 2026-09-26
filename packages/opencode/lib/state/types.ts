@@ -1,4 +1,4 @@
-import type { PlanSnapshot } from "@better-compact/core"
+import type { CompactionConfig, PlanSnapshot } from "@better-compact/core"
 import { Message, Part } from "@opencode-ai/sdk/v2"
 
 export interface WithParts {
@@ -37,8 +37,8 @@ export interface BoundaryJobProgress {
         summaryJobsSucceeded?: number
         summaryJobsFailed?: number
         beforeTokens?: number
-        afterTokens?: number
         currentTokens?: number
+        afterTokens?: number
         targetTokens?: number
         contextLimit?: number
         stageClearedTokens?: number
@@ -55,10 +55,14 @@ export interface BoundaryJobProgress {
 // content) can inherit a matching plan.
 export interface BoundaryPlanSnapshot extends PlanSnapshot {
     prefixFingerprint?: string
+    /** Absent for the pre-semantic fingerprint; keep old plans replayable. */
+    prefixFingerprintVersion?: 2
     compactedMessageCount?: number
     // Absent in snapshots created before generated plugin prompts were
     // classified as tool-like. Used to replan older affected sessions once.
     pluginInjectionPruning?: true
+    /** Absent when OpenAI's encrypted reasoning bytes were invisible to planning. */
+    reasoningMetadataPriced?: true
     // Prevent repeatedly paying for a chunk synthesis on an unchanged range.
     prefixChunkAttempted?: true
     prefixChunkVersion?: number
@@ -68,6 +72,39 @@ export interface BoundaryPlanSnapshot extends PlanSnapshot {
 export interface BoundaryState {
     job: BoundaryJobProgress | null
     activePlan: BoundaryPlanSnapshot | null
+    /** Manual request waiting for the next completed assistant turn (idle and next-user-turn are fallbacks). */
+    queuedManual?: {
+        requestedAt: number
+        /** Durable in-flight intent; recovery is only retried at a safe turn boundary. */
+        phase?: "running" | "recovery"
+        jobId?: string
+        jobStartedAt?: number
+        lastUserMessageId?: string
+        params?: {
+            providerId: string | undefined
+            modelId: string | undefined
+            agent: string | undefined
+            variant: string | undefined
+        }
+        compaction?: Partial<CompactionConfig>
+        contextLimit?: number
+        currentTokens?: number
+        summaryVariant?: string
+    }
+    lastIdleUsageMessageId?: string
+    /** Provider response already used to build the active automatic plan. */
+    lastPlannedUsageMessageId?: string
+    automaticCheck?: {
+        at: string
+        count: number
+        /** Which supported host seam actually ran (legacy snapshots may omit it). */
+        seam?: "pre_request" | "idle"
+        reason: string
+        providerTokens: number
+        estimatedTokens: number
+        triggerTokens: number
+        contextLimit: number | null
+    }
 }
 
 export interface SessionState {

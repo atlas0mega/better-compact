@@ -74,7 +74,12 @@ function toolPart(
     }
 }
 
-function errorToolPart(messageID: string, tool: string, error: string, input: Record<string, unknown>) {
+function errorToolPart(
+    messageID: string,
+    tool: string,
+    error: string,
+    input: Record<string, unknown>,
+) {
     return {
         id: `${messageID}-${tool}-error`,
         messageID,
@@ -127,7 +132,12 @@ function filler(word: string, count: number): string {
 
 function toolsHeavyConversation(): WithParts[] {
     return [
-        message("msg-user-1", "user", [textPart("msg-user-1", "Keep this exact requirement intact.")], 1),
+        message(
+            "msg-user-1",
+            "user",
+            [textPart("msg-user-1", "Keep this exact requirement intact.")],
+            1,
+        ),
         message(
             "msg-assistant-1",
             "assistant",
@@ -135,28 +145,49 @@ function toolsHeavyConversation(): WithParts[] {
                 reasoningPart("msg-assistant-1", filler("silent-thought", 40)),
                 textPart("msg-assistant-1", "Investigated the compaction path end to end."),
                 toolPart("msg-assistant-1", "read", filler("old-tool-output", 900)),
-                toolPart("msg-assistant-1", "skill", filler("skill-body", 700), { name: "root-cause-debug" }),
-                errorToolPart("msg-assistant-1", "bash", "ENOENT: missing config", { command: "npm run test" }),
+                toolPart("msg-assistant-1", "skill", filler("skill-body", 700), {
+                    name: "root-cause-debug",
+                }),
+                errorToolPart("msg-assistant-1", "bash", "ENOENT: missing config", {
+                    command: "npm run test",
+                }),
             ],
             2,
         ),
-        message("msg-user-2", "user", [textPart("msg-user-2", "Continue with the plugin-only design.")], 3),
+        message(
+            "msg-user-2",
+            "user",
+            [textPart("msg-user-2", "Continue with the plugin-only design.")],
+            3,
+        ),
         message(
             "msg-assistant-2",
             "assistant",
             [
                 textPart("msg-assistant-2", "Recent assistant tail should remain raw."),
-                toolPart("msg-assistant-2", "grep", filler("recent-tool-output", 120), { pattern: "needle" }),
+                toolPart("msg-assistant-2", "grep", filler("recent-tool-output", 120), {
+                    pattern: "needle",
+                }),
             ],
             4,
         ),
-        message("msg-user-3", "user", [textPart("msg-user-3", "Latest user tail should remain raw.")], 5),
+        message(
+            "msg-user-3",
+            "user",
+            [textPart("msg-user-3", "Latest user tail should remain raw.")],
+            5,
+        ),
     ]
 }
 
 function reasoningHeavyConversation(): WithParts[] {
     return [
-        message("msg-user-1", "user", [textPart("msg-user-1", "First task with firm constraints.")], 1),
+        message(
+            "msg-user-1",
+            "user",
+            [textPart("msg-user-1", "First task with firm constraints.")],
+            1,
+        ),
         message(
             "msg-assistant-1",
             "assistant",
@@ -168,14 +199,24 @@ function reasoningHeavyConversation(): WithParts[] {
             2,
         ),
         message("msg-user-2", "user", [textPart("msg-user-2", "Second task.")], 3),
-        message("msg-assistant-2", "assistant", [textPart("msg-assistant-2", "Middle assistant reply.")], 4),
+        message(
+            "msg-assistant-2",
+            "assistant",
+            [textPart("msg-assistant-2", "Middle assistant reply.")],
+            4,
+        ),
         message("msg-user-3", "user", [textPart("msg-user-3", "Latest user message.")], 5),
     ]
 }
 
 function multiRunConversation(): WithParts[] {
     return [
-        message("msg-user-1", "user", [textPart("msg-user-1", "First task, keep this requirement.")], 1),
+        message(
+            "msg-user-1",
+            "user",
+            [textPart("msg-user-1", "First task, keep this requirement.")],
+            1,
+        ),
         message(
             "msg-assistant-big",
             "assistant",
@@ -189,7 +230,11 @@ function multiRunConversation(): WithParts[] {
         message(
             "msg-assistant-big-2",
             "assistant",
-            [toolPart("msg-assistant-big-2", "bash", filler("build-output", 220), { command: "npm test" })],
+            [
+                toolPart("msg-assistant-big-2", "bash", filler("build-output", 220), {
+                    command: "npm test",
+                }),
+            ],
             3,
         ),
         message("msg-user-2", "user", [textPart("msg-user-2", "Second task.")], 4),
@@ -199,12 +244,19 @@ function multiRunConversation(): WithParts[] {
             [
                 reasoningPart("msg-assistant-small", filler("small-private-reasoning", 60)),
                 textPart("msg-assistant-small", "small assistant detail"),
-                toolPart("msg-assistant-small", "grep", filler("small-tool-output", 60), { pattern: "needle" }),
+                toolPart("msg-assistant-small", "grep", filler("small-tool-output", 60), {
+                    pattern: "needle",
+                }),
             ],
             5,
         ),
         message("msg-user-3", "user", [textPart("msg-user-3", "Third task stays raw.")], 6),
-        message("msg-assistant-tail", "assistant", [textPart("msg-assistant-tail", "tail assistant")], 7),
+        message(
+            "msg-assistant-tail",
+            "assistant",
+            [textPart("msg-assistant-tail", "tail assistant")],
+            7,
+        ),
         message("msg-user-4", "user", [textPart("msg-user-4", "Latest user stays raw.")], 8),
     ]
 }
@@ -238,21 +290,20 @@ function exoticPartsConversation(): WithParts[] {
             "msg-assistant-1",
             "assistant",
             [
-                { id: "msg-assistant-1-step", messageID: "msg-assistant-1", sessionID, type: "step-start" as const } as any,
+                {
+                    id: "msg-assistant-1-step",
+                    messageID: "msg-assistant-1",
+                    sessionID,
+                    type: "step-start" as const,
+                } as any,
                 reasoningPart("msg-assistant-1", filler("openai-hidden-reasoning", 500)),
                 textPart("msg-assistant-1", filler("assistant-progress", 40)),
-                toolPart(
-                    "msg-assistant-1",
-                    "todowrite",
-                    "todos recorded",
-                    { todos: [{ content: "obsolete task", status: "pending", priority: "high" }] },
-                ),
-                toolPart(
-                    "msg-assistant-1",
-                    "todowrite",
-                    "todos updated",
-                    { todos: [{ content: "current task", status: "in_progress", priority: "high" }] },
-                ),
+                toolPart("msg-assistant-1", "todowrite", "todos recorded", {
+                    todos: [{ content: "obsolete task", status: "pending", priority: "high" }],
+                }),
+                toolPart("msg-assistant-1", "todowrite", "todos updated", {
+                    todos: [{ content: "current task", status: "in_progress", priority: "high" }],
+                }),
                 toolPart(
                     "msg-assistant-1",
                     "read",
@@ -297,7 +348,12 @@ function exoticPartsConversation(): WithParts[] {
             4,
         ),
         message("msg-user-3", "user", [textPart("msg-user-3", "Tail user request.")], 5),
-        message("msg-assistant-3", "assistant", [textPart("msg-assistant-3", "Tail assistant reply.")], 6),
+        message(
+            "msg-assistant-3",
+            "assistant",
+            [textPart("msg-assistant-3", "Tail assistant reply.")],
+            6,
+        ),
         message("msg-user-4", "user", [textPart("msg-user-4", "Latest user request.")], 7),
     ]
 }
@@ -338,7 +394,12 @@ interface Scenario {
 function regrow(messages: WithParts[]): void {
     for (let index = 0; index < 12; index++) {
         messages.push(
-            message(`msg-user-new-${index}`, "user", [textPart(`msg-user-new-${index}`, "next task")], 100 + index * 2),
+            message(
+                `msg-user-new-${index}`,
+                "user",
+                [textPart(`msg-user-new-${index}`, "next task")],
+                100 + index * 2,
+            ),
             message(
                 `msg-assistant-new-${index}`,
                 "assistant",
@@ -374,7 +435,12 @@ const scenarios: Scenario[] = [
         expect: (plan) => {
             assert.ok(plan)
             const names = plan.stages.map((stage) => stage.name)
-            assert.deepEqual(names, ["skills", "supersede-reads", "purge-error-inputs", "tools-old"])
+            assert.deepEqual(names, [
+                "skills",
+                "supersede-reads",
+                "purge-error-inputs",
+                "tools-old",
+            ])
             assert.equal(plan.stages.at(-1)?.status, "target-met")
             assert.equal(plan.preservedToolCallIds.length, 1)
         },
@@ -394,8 +460,8 @@ const scenarios: Scenario[] = [
         },
     },
     {
-        // A generous recent-tool budget carries the heavy tool results through
-        // tools-old; only the preserved-set-free tools-remaining pass clears them.
+        // A generous configured tool budget is capped by the full target;
+        // an oversized old result must not make the next provider request overflow.
         name: "through-tools-remaining",
         messages: toolsHeavyConversation,
         options: { contextLimit: 3_000, recentToolResultBudgetTokens: 5_000 },
@@ -405,13 +471,17 @@ const scenarios: Scenario[] = [
             const names = plan.stages.map((stage) => stage.name)
             assert.ok(names.includes("reasoning"))
             assert.ok(names.includes("tools-remaining"))
-            assert.equal(plan.preservedToolCallIds.length, 2)
+            assert.equal(plan.preservedToolCallIds.length, 1)
         },
     },
     {
         name: "assistant-runs-pending-jobs",
         messages: multiRunConversation,
-        options: { contextLimit: 9_000, recentToolResultBudgetTokens: 0 },
+        options: {
+            contextLimit: 9_000,
+            recentToolResultBudgetTokens: 0,
+            recentAssistantOutputs: 0,
+        },
         replays: [
             { name: "identical" },
             {
@@ -432,7 +502,11 @@ const scenarios: Scenario[] = [
     {
         name: "assistant-runs-with-summaries",
         messages: multiRunConversation,
-        options: { contextLimit: 9_000, recentToolResultBudgetTokens: 0 },
+        options: {
+            contextLimit: 9_000,
+            recentToolResultBudgetTokens: 0,
+            recentAssistantOutputs: 0,
+        },
         summariesText: "Accepted summary: shipped the first task end to end.",
         replays: [{ name: "identical" }],
         expect: (plan) => {
@@ -464,11 +538,14 @@ const scenarios: Scenario[] = [
         expect: (plan) => {
             assert.ok(plan)
             assert.equal(plan.requiresCustomCompaction, true)
-            assert.equal(plan.prefixSummary, "Custom checkpoint: finished task one; task two pending review.")
+            assert.equal(
+                plan.prefixSummary,
+                "Custom checkpoint: finished task one; task two pending review.",
+            )
         },
     },
     {
-        name: "provider-overhead",
+        name: "provider-prior-reading",
         messages: multiRunConversation,
         options: {
             contextLimit: 120_000,
@@ -479,7 +556,7 @@ const scenarios: Scenario[] = [
         replays: [{ name: "identical" }],
         expect: (plan) => {
             assert.ok(plan)
-            assert.ok(plan.overheadTokens > 0)
+            assert.equal(plan.overheadTokens, 0)
             assert.equal(plan.beforeTokens, 60_000)
         },
     },
@@ -501,7 +578,10 @@ const scenarios: Scenario[] = [
     },
 ]
 
-async function captureScenario(scenario: Scenario, workDirectory: string): Promise<Record<string, unknown>> {
+async function captureScenario(
+    scenario: Scenario,
+    workDirectory: string,
+): Promise<Record<string, unknown>> {
     const logger = new Logger(false)
     const input = scenario.messages()
     const record: Record<string, unknown> = {
@@ -511,9 +591,14 @@ async function captureScenario(scenario: Scenario, workDirectory: string): Promi
 
     let plan = buildBoundaryContextPlan(clone(input), scenario.options)
     if (plan && scenario.summariesText) {
-        const summaries = Object.fromEntries(plan.assistantSummaryKeys.map((key) => [key, scenario.summariesText!]))
+        const summaries = Object.fromEntries(
+            plan.assistantSummaryKeys.map((key) => [key, scenario.summariesText!]),
+        )
         record.firstPassSummaryKeys = normalize(plan.assistantSummaryKeys)
-        plan = buildBoundaryContextPlan(clone(input), { ...scenario.options, assistantSummaries: summaries })
+        plan = buildBoundaryContextPlan(clone(input), {
+            ...scenario.options,
+            assistantSummaries: summaries,
+        })
     }
     scenario.expect?.(plan, record)
 
@@ -575,7 +660,11 @@ if (process.env.GOLDEN_UPDATE) {
         const captured = await captureAll()
         assert.deepEqual(Object.keys(captured).sort(), Object.keys(expected).sort())
         for (const name of Object.keys(expected)) {
-            assert.deepStrictEqual(captured[name], expected[name], `golden scenario drifted: ${name}`)
+            assert.deepStrictEqual(
+                captured[name],
+                expected[name],
+                `golden scenario drifted: ${name}`,
+            )
         }
     })
 }

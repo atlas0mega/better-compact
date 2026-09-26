@@ -6,10 +6,12 @@ import { test } from "bun:test"
 
 type RegisteredCommand = {
     slashName: string
+    slashAliases?: string[]
+    name: string
     run: () => void | Promise<void>
 }
 
-test("confirmed below-trigger runs open progress after the host clears confirmation", async () => {
+test("first compaction follows the session's latest variant after a user changes it", async () => {
     const sessionID = `tui-command-${process.pid}-${Date.now()}`
     const configHome = mkdtempSync(join(tmpdir(), "better-compact-tui-command-"))
     const previousConfigHome = process.env.XDG_CONFIG_HOME
@@ -28,10 +30,13 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
     try {
         const { default: plugin } = await import(`../tui.tsx?test=${Date.now()}`)
         let commands: RegisteredCommand[] = []
+        let redirectPriority = 0
         let confirm: (() => void) | undefined
         let promptCalls = 0
         let promptInput: any
         let promptFailure: Error | undefined
+        let activeVariant = "medium"
+        let sessionStatus: "idle" | "busy" = "idle"
         let clearCalls = 0
         let dialogOnClose: (() => void) | undefined
         let disposeHandler: (() => void) | undefined
@@ -44,17 +49,21 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
                         promptInput = input
                         if (promptFailure) throw promptFailure
                     },
+                    summarize: async () => {
+                        throw new Error("native session.summarize must never run")
+                    },
                 },
             },
             state: {
                 path: { directory: configHome, worktree: configHome },
                 session: {
+                    status: () => ({ type: sessionStatus }),
                     get: () => ({
                         agent: "tennis-mc-specialist",
                         model: {
                             id: "model-1",
                             providerID: "provider-1",
-                            variant: "medium",
+                            variant: activeVariant,
                         },
                     }),
                     messages: () => [
@@ -77,7 +86,10 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
                     {
                         id: "provider-1",
                         models: {
-                            "model-1": { limit: { context: 100 }, variants: { high: {} } },
+                            "model-1": {
+                                limit: { context: 100 },
+                                variants: { high: {}, xhigh: {} },
+                            },
                         },
                     },
                 ],
@@ -88,8 +100,10 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
                 set: () => undefined,
             },
             keymap: {
-                registerLayer: (layer: { commands: RegisteredCommand[] }) => {
-                    commands = layer.commands
+                registerLayer: (layer: { commands: RegisteredCommand[]; priority?: number }) => {
+                    commands.push(...layer.commands)
+                    if (layer.commands.some((item) => item.name === "session.compact"))
+                        redirectPriority = layer.priority ?? 0
                 },
             },
             lifecycle: {
@@ -127,8 +141,17 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
         await plugin.tui(api as never)
         const command = commands.find((item) => item.slashName === "better-compact")
         assert.ok(command)
+        const redirect = commands.find((item) => item.slashName === "compact")
+        assert.ok(redirect)
+        assert.ok(redirectPriority > 0, "the redirect must outrank OpenCode's built-in command")
+        assert.equal(redirect.name, "session.compact")
+        assert.deepEqual(redirect.slashAliases, ["summarize"])
+        assert.equal(redirect.run, command.run)
 
-        await command.run()
+        // The user switches from the initial session variant before the first
+        // compaction; there is no intervening user message to refresh metadata.
+        activeVariant = "xhigh"
+        await redirect.run()
         assert.equal(dialogRenders.length, 1)
         dialogRenders[0]()
         assert.ok(confirm)
@@ -153,9 +176,27 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
         assert.equal(metadata.summaryProviderID, "provider-1")
         assert.equal(metadata.summaryModelID, "model-1")
         assert.equal(metadata.summaryVariant, "high")
+        assert.equal(metadata.chatVariant, "xhigh")
+        assert.equal(metadata.chatProviderID, "provider-1")
+        assert.equal(metadata.chatModelID, "model-1")
         assert.deepEqual(promptInput.model, { providerID: "provider-1", modelID: "model-1" })
         assert.equal(promptInput.agent, "tennis-mc-specialist")
-        assert.equal(promptInput.variant, "high")
+        assert.equal(promptInput.variant, "xhigh")
+        assert.equal(promptInput.noReply, true, "an idle manual call must not start a chat turn")
+
+        sessionStatus = "busy"
+        api.ui.dialog.clear()
+        const beforeBusy = dialogRenders.length
+        await command.run()
+        dialogRenders[beforeBusy]()
+        assert.ok(confirm)
+        confirm()
+        api.ui.dialog.clear()
+        for (let attempt = 0; attempt < 100 && promptCalls < 2; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 1))
+        }
+        assert.equal(promptCalls, 2)
+        assert.equal(promptInput.noReply, false, "a busy manual call must join the active run")
 
         api.ui.dialog.clear()
         const beforeFailure = dialogRenders.length
@@ -165,11 +206,11 @@ test("confirmed below-trigger runs open progress after the host clears confirmat
         assert.ok(confirm)
         confirm()
         api.ui.dialog.clear()
-        for (let attempt = 0; attempt < 100 && promptCalls < 2; attempt++) {
+        for (let attempt = 0; attempt < 100 && promptCalls < 3; attempt++) {
             await new Promise((resolve) => setTimeout(resolve, 1))
         }
 
-        assert.equal(promptCalls, 2)
+        assert.equal(promptCalls, 3)
         assert.ok(dialogRenders.length >= beforeFailure + 3)
         disposeHandler?.()
     } finally {

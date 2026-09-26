@@ -3,10 +3,39 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { parse } from "jsonc-parser/lib/esm/main.js"
-import { availableSummaryEfforts, resolveSummaryVariant } from "../lib/tui/data"
+import {
+    availableSummaryEfforts,
+    currentContextUsage,
+    resolveSummaryVariant,
+} from "../lib/tui/data"
 import { boundaryRangeHash } from "../lib/boundary/fingerprint"
 import { createSessionState, saveSessionState, type WithParts } from "../lib/state"
 import { Logger } from "../lib/logger"
+
+test("a new session uses its selected xhigh variant before any assistant response", () => {
+    const api = {
+        state: {
+            session: {
+                messages: () => [],
+                get: () => ({
+                    model: {
+                        providerID: "openai",
+                        id: "gpt-6-sol",
+                        variant: "xhigh",
+                    },
+                }),
+            },
+            provider: [{ id: "openai", models: { "gpt-6-sol": { limit: { context: 650_000 } } } }],
+        },
+    }
+    expect(currentContextUsage(api as never, "new-session")).toEqual({
+        tokens: 0,
+        limit: 650_000,
+        providerID: "openai",
+        modelID: "gpt-6-sol",
+        variant: "xhigh",
+    })
+})
 
 const previousConfigHome = process.env.XDG_CONFIG_HOME
 const previousDataHome = process.env.XDG_DATA_HOME
@@ -77,6 +106,7 @@ test("global compaction save preserves JSONC comments and unrelated settings", a
             triggerPercent: 80,
             targetPercent: 30,
             recentToolTokens: 30_000,
+            recentReasoningTokens: 0,
             summarizerConcurrency: 4,
             collapsePercent: 25,
             prefixSummary: false,
@@ -326,6 +356,7 @@ test("forked sessions remap a matching semantic plan to new message IDs", async 
         childMessages,
         project,
         new Logger(false),
+        async (id: string) => id === "child" ? "Shared project (fork #1)" : "Shared project",
     )
 
     expect(inherited?.sessionId).toBe("child")

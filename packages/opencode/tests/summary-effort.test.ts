@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { createOpencodeClient } from "@opencode-ai/sdk"
 import { resolveCompactionVariant, summarizeBoundaryJobs } from "../lib/boundary/summarizer"
 import { Logger } from "../lib/logger"
 import { createRuntimeState } from "../lib/state"
@@ -29,11 +30,67 @@ test("compaction reasoning uses the requested model variant", async () => {
 test("inherit, unsupported effort and provider errors preserve the active variant", async () => {
     assert.equal(await resolveCompactionVariant(client, params, "inherit"), "high")
     assert.equal(await resolveCompactionVariant(client, params, "medium"), "high")
-    assert.equal(await resolveCompactionVariant({}, params, "low"), "high")
+    assert.equal(await resolveCompactionVariant({}, params, "low"), "low")
     assert.equal(
         await resolveCompactionVariant(client, { ...params, modelId: "other" }, "low"),
         "high",
     )
+})
+
+test("explicit Luna effort survives a v1 provider response with no variants", async () => {
+    const noVariants = {
+        provider: {
+            list: async () => ({
+                data: {
+                    all: [
+                        { id: "openai", models: { "gpt-6-luna": { limit: { context: 700_000 } } } },
+                    ],
+                },
+            }),
+        },
+    }
+    const luna = {
+        providerId: "openai",
+        modelId: "gpt-6-luna",
+        agent: "specialist",
+        variant: undefined,
+    }
+    assert.equal(await resolveCompactionVariant(noVariants, luna, "high"), "high")
+    assert.equal(await resolveCompactionVariant(noVariants, luna, "inherit"), undefined)
+    assert.equal(
+        await resolveCompactionVariant(
+            { provider: { list: async () => ({ data: { all: [] } }) } },
+            luna,
+            "high",
+        ),
+        "high",
+    )
+    assert.equal(await resolveCompactionVariant({}, luna, "high"), "high")
+})
+
+test("the installed root SDK sends the explicit high variant in its prompt body", async () => {
+    let sent: any
+    const sdk = createOpencodeClient({
+        baseUrl: "http://localhost:12345",
+        fetch: async (request) => {
+            sent = { path: new URL(request.url).pathname, body: await request.json() }
+            return new Response(JSON.stringify({ info: { variant: "high" }, parts: [] }), {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+            })
+        },
+    })
+    await sdk.session.prompt({
+        path: { id: "scratch" },
+        body: {
+            model: { providerID: "openai", modelID: "gpt-6-luna" },
+            variant: "high",
+            parts: [{ type: "text", text: "Synthetic summary input." }],
+        } as any,
+    })
+    assert.equal(sent.path, "/session/scratch/message")
+    assert.equal(sent.body.model.modelID, "gpt-6-luna")
+    assert.equal(sent.body.variant, "high")
 })
 
 const job = {
@@ -139,6 +196,45 @@ test("scratch summaries route to a chosen model with its own high reasoning vari
     assert.equal(summaries[job.key], validSummary)
 })
 
+test("a scratch response reporting default effort cannot be accepted as high", async () => {
+    const logger = new Logger(false)
+    const sdk = {
+        provider: {
+            list: async () => ({
+                data: {
+                    all: [
+                        { id: "openai", models: { "gpt-6-luna": { limit: { context: 700_000 } } } },
+                    ],
+                },
+            }),
+        },
+        session: {
+            create: async () => ({ data: { id: "luna-scratch" } }),
+            prompt: async ({ body }: any) => {
+                assert.equal(body.variant, "high")
+                return {
+                    data: {
+                        info: { variant: "default" },
+                        parts: [{ type: "text", text: validSummary }],
+                    },
+                }
+            },
+            delete: async () => ({ data: true }),
+        },
+    }
+    const summaries = await summarizeBoundaryJobs({
+        client: sdk,
+        runtime: createRuntimeState(sdk, logger),
+        logger,
+        parentSessionId: "parent-session",
+        jobs: [job],
+        params,
+        summaryModel: "openai/gpt-6-luna",
+        summaryEffort: "high",
+    })
+    assert.equal(summaries[job.key], undefined)
+})
+
 test("inherit does not send the chat model variant to a different summary model", async () => {
     const logger = new Logger(false)
     const sdk = {
@@ -239,7 +335,13 @@ test("scratch create errors are reported instead of silently skipping jobs", asy
     }
     const sdk = {
         session: {
-            create: async () => ({ error: { message: "model.id required" } }),
+            create: async () => ({
+                error: {
+                    status: 400,
+                    name: "BadRequest",
+                    message: "model.id required; user content MUST NOT LOG",
+                },
+            }),
             prompt: async () => {
                 throw new Error("prompt should not run")
             },
@@ -261,7 +363,40 @@ test("scratch create errors are reported instead of silently skipping jobs", asy
     assert.deepEqual(summaries, {})
     assert.ok(
         warnings.some((warning) =>
-            warning.includes("Scratch session creation failed: model.id required"),
+            warning.includes("Scratch session creation failed HTTP 400 (BadRequest)"),
         ),
     )
+    assert.ok(warnings.every((warning) => !warning.includes("MUST NOT LOG")))
+})
+
+test("scratch transport exceptions cannot echo private evidence into diagnostics", async () => {
+    const warnings: string[] = []
+    const logger = new Logger(false)
+    logger.warn = (message, data) => {
+        warnings.push(`${message}: ${data?.error}`)
+        return Promise.resolve()
+    }
+    const sdk = {
+        session: {
+            create: async () => ({ data: { id: "scratch-secret-test" } }),
+            prompt: async () => {
+                throw new Error("provider echoed PRIVATE_PROMPT_EVIDENCE and bearer TOKEN")
+            },
+            delete: async () => {
+                throw new Error("failed to delete PRIVATE_PROMPT_EVIDENCE")
+            },
+        },
+    }
+    const result = await summarizeBoundaryJobs({
+        client: sdk,
+        runtime: createRuntimeState(sdk, logger),
+        logger,
+        parentSessionId: "parent-session",
+        jobs: [job],
+        params,
+        summaryEffort: "inherit",
+    })
+    assert.deepEqual(result, {})
+    assert.ok(warnings.some((warning) => warning.includes("transport_error")))
+    assert.ok(warnings.every((warning) => !/PRIVATE_PROMPT_EVIDENCE|TOKEN/.test(warning)))
 })

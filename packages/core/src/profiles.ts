@@ -5,6 +5,8 @@ export interface CompactionCustomSettings {
     triggerPercent: number
     targetPercent: number
     recentToolTokens: number
+    /** Nonbinding prompt guidance for conclusions from recent reasoning. */
+    recentReasoningTokens?: number
     summarizerConcurrency: number
     /**
      * Whether the last-resort prefix summary may run when pruning alone cannot
@@ -86,6 +88,7 @@ export function normalizeCompactionCustom(
             200_000,
             DEFAULT_CUSTOM_COMPACTION.recentToolTokens,
         ),
+        recentReasoningTokens: clampInteger(input?.recentReasoningTokens, 0, 200_000, 0),
         summarizerConcurrency: clampInteger(
             input?.summarizerConcurrency,
             1,
@@ -112,7 +115,11 @@ export function resolveCompactionProfile(
     if (preset === "custom") return { preset, ...custom }
     // The prefix-summary opt-in is orthogonal to a preset's pruning numbers,
     // so it carries through instead of being pinned to the preset's default.
-    return { ...COMPACTION_PRESETS[preset], prefixSummary: custom.prefixSummary }
+    return {
+        ...COMPACTION_PRESETS[preset],
+        prefixSummary: custom.prefixSummary,
+        recentReasoningTokens: custom.recentReasoningTokens,
+    }
 }
 
 export function normalizePreset(value: unknown): CompactionPreset {

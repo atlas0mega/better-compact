@@ -4,6 +4,18 @@ import { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { Logger } from "./logger"
 import { getLastUserMessage } from "./messages/query"
 
+function hasProviderUsage(message: WithParts): boolean {
+    if (message.info.role !== "assistant") return false
+    const tokens = message.info.tokens
+    // OpenCode splits visible output and reasoning. A reasoning-only response
+    // can have output=0 while its reported total still fills the context.
+    return (
+        (typeof tokens?.total === "number" && Number.isFinite(tokens.total) && tokens.total > 0) ||
+        (tokens?.output ?? 0) > 0 ||
+        (tokens?.reasoning ?? 0) > 0
+    )
+}
+
 export function getCurrentTokenUsage(state: SessionState, messages: WithParts[]): number {
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i]
@@ -12,7 +24,7 @@ export function getCurrentTokenUsage(state: SessionState, messages: WithParts[])
         }
 
         const assistantInfo = msg.info as AssistantMessage
-        if ((assistantInfo.tokens?.output || 0) <= 0) {
+        if (!hasProviderUsage(msg)) {
             continue
         }
 
@@ -38,6 +50,25 @@ export function getCurrentTokenUsage(state: SessionState, messages: WithParts[])
     }
 
     return 0
+}
+
+/** Identity of the response whose provider usage is currently the trigger input. */
+export function getCurrentUsageMessageId(
+    state: SessionState,
+    messages: WithParts[],
+): string | undefined {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const info = messages[i].info
+        if (!hasProviderUsage(messages[i])) continue
+        if (
+            state.lastCompaction > 0 &&
+            (info.time.created < state.lastCompaction ||
+                (info.summary === true && info.time.created === state.lastCompaction))
+        )
+            return undefined
+        return info.id
+    }
+    return undefined
 }
 
 export function getCurrentParams(

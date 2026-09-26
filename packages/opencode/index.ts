@@ -12,9 +12,11 @@ import {
     createEventHandler,
     createSystemPromptHandler,
     createTextCompleteHandler,
+    startArchiveDescriptionBackfill,
 } from "./lib/hooks"
 import { configureClientAuth, isSecureMode } from "./lib/auth"
 import { startAutoUpdate } from "./lib/update"
+import { betterCompactRecall } from "./lib/tools/recall"
 
 const RUNTIME_REGISTRY = Symbol.for("better-compact.server.instances")
 
@@ -73,6 +75,17 @@ const server: Plugin = (async (ctx) => {
     logger.info("Better Compact initialized")
 
     startAutoUpdate(ctx, config.autoUpdate)
+    void startArchiveDescriptionBackfill({
+        client: ctx.client,
+        runtime,
+        logger,
+        directory: ctx.directory,
+        summaryModel: config.compaction.summaryModel,
+    }).catch((error) => {
+        logger.warn("Archive startup backfill failed", {
+            error: error instanceof Error ? error.name : "unknown",
+        })
+    })
 
     return {
         "experimental.chat.system.transform": createSystemPromptHandler(runtime, logger, config),
@@ -104,8 +117,16 @@ const server: Plugin = (async (ctx) => {
             hostPermissions,
             loadConfig,
         ),
-        event: createEventHandler(runtime, logger),
-        tool: {},
+        event: createEventHandler(
+            runtime,
+            logger,
+            ctx.client,
+            config,
+            ctx.directory,
+            hostPermissions,
+            loadConfig,
+        ),
+        tool: { better_compact_recall: betterCompactRecall },
         config: async (opencodeConfig) => {
             if (
                 config.compress.permission !== "deny" &&

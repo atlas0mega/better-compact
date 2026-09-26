@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { createRuntimeState, type WithParts } from "../lib/state"
+import { createRuntimeState, saveSessionState, type WithParts } from "../lib/state"
+import { createBoundaryJob } from "../lib/boundary/progress"
 import { Logger } from "../lib/logger"
 
 function userMessage(sessionID: string): WithParts {
@@ -95,4 +96,51 @@ test("runtime state allows only one compaction per session", async () => {
         runtime.startCompaction("session-a", async () => {}),
         true,
     )
+})
+
+test("a restart marks orphaned compaction progress interrupted without losing a saved plan or queue", async () => {
+    const sessionID = `ses-restart-job-${process.pid}-${Date.now()}`
+    const logger = new Logger(false)
+    const client = { session: { get: async () => ({ data: { parentID: null } }) } }
+    const runtime = createRuntimeState(client, logger)
+    const state = runtime.get(sessionID)
+    const plan = { rangeHash: "committed-plan" } as NonNullable<typeof state.boundary.activePlan>
+    state.boundary.activePlan = plan
+    state.boundary.job = createBoundaryJob({ sessionId: sessionID })
+    state.boundary.queuedManual = { requestedAt: Date.now(), lastUserMessageId: "prior-user" }
+    await saveSessionState(state, logger)
+
+    const restarted = createRuntimeState(client, logger)
+    const recovered = await restarted.prepare(sessionID, [userMessage(sessionID)])
+    assert.equal(recovered.boundary.job?.status, "failed")
+    assert.match(recovered.boundary.job?.error ?? "", /Interrupted by OpenCode restart/)
+    assert.deepEqual(recovered.boundary.activePlan, plan)
+    assert.ok(recovered.boundary.queuedManual)
+    const reloaded = await createRuntimeState(client, logger).prepare(sessionID, [
+        userMessage(sessionID),
+    ])
+    assert.equal(reloaded.boundary.job?.status, "failed", "interruption is persisted once")
+})
+
+test("a new manual intent survives a crash before its job replaces an older failed job", async () => {
+    const sessionID = `ses-restart-before-job-${process.pid}-${Date.now()}`
+    const logger = new Logger(false)
+    const client = { session: { get: async () => ({ data: { parentID: null } }) } }
+    const state = createRuntimeState(client, logger).get(sessionID)
+    state.boundary.job = createBoundaryJob({ sessionId: sessionID, id: "bc_old_failed" })
+    state.boundary.job.status = "failed"
+    state.boundary.queuedManual = {
+        requestedAt: Date.now(),
+        phase: "running",
+        jobId: "bc_new_pending",
+        lastUserMessageId: `user-${sessionID}`,
+    }
+    await saveSessionState(state, logger)
+
+    const resumed = await createRuntimeState(client, logger).prepare(sessionID, [
+        userMessage(sessionID),
+    ])
+    assert.equal(resumed.boundary.queuedManual?.phase, "recovery")
+    assert.equal(resumed.boundary.queuedManual?.jobId, "bc_new_pending")
+    assert.equal(resumed.boundary.job?.status, "failed")
 })

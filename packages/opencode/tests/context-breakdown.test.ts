@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { analyzeContextTokens, formatContextMessage } from "../lib/commands/context"
+import { estimateOpenCodeMessages } from "../lib/context-estimate"
 import { createSessionState, type WithParts } from "../lib/state"
 
 const sessionID = "ses_context_breakdown"
@@ -135,4 +136,34 @@ test("context report does not claim a fake system percentage", () => {
     assert.match(report, /Reported by OpenCode/)
     assert.match(report, /Unattributed\/provider overhead\/cache\/system/)
     assert.doesNotMatch(report, /^System\s+/m)
+})
+
+test("OpenAI reasoning counts opaque encrypted input even when its visible text is empty", () => {
+    const reasoning = message(
+        "msg-hidden-reasoning",
+        "assistant",
+        [
+            {
+                id: "reasoning-encrypted",
+                messageID: "msg-hidden-reasoning",
+                sessionID,
+                type: "reasoning",
+                text: "",
+                metadata: {
+                    openai: {
+                        itemId: "rsn_123",
+                        reasoningEncryptedContent: "QUJD".repeat(8_000),
+                    },
+                },
+            },
+        ],
+        2,
+    )
+    const without = { ...reasoning, parts: [] }
+    const baseline = estimateOpenCodeMessages([without])
+    const full = estimateOpenCodeMessages([reasoning])
+    assert.ok(full - baseline > 5_000, "encrypted reasoning consumes provider context")
+    const state = createSessionState()
+    state.sessionId = sessionID
+    assert.ok(analyzeContextTokens(state, [reasoning]).reasoning > 5_000)
 })

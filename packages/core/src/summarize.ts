@@ -41,6 +41,8 @@ export interface SummarizeJobsInput {
     maxJobsPerBatch?: number
     /** Preserve a complete chunk summary or fall back; never truncate it. */
     rejectOversized?: boolean
+    /** Per-result limit; prefix chunks need more room than a single turn. */
+    maxSummaryChars?: number
     onProgress?: (event: SummarizeProgressEvent) => Promise<void> | void
 }
 
@@ -105,6 +107,7 @@ export function createSummaryScheduler(
                             input.summarizer,
                             logger,
                             input.rejectOversized,
+                            input.maxSummaryChars,
                         ),
                     ),
                 )
@@ -233,7 +236,7 @@ async function summarizeBatches(
             for (const job of group) {
                 const value =
                     output && typeof output[job.key] === "string"
-                        ? validateSummary(output[job.key], job, logger, input.rejectOversized)
+                        ? validateSummary(output[job.key], job, logger, input.rejectOversized, input.maxSummaryChars)
                         : null
                 if (value) {
                     summaries[job.key] = value
@@ -265,10 +268,11 @@ async function runJob(
     summarizer: Summarizer,
     logger: Logger,
     rejectOversized?: boolean,
+    maxSummaryChars?: number,
 ): Promise<string | null> {
     try {
         const raw = await summarizer.complete(job)
-        return raw === null ? null : validateSummary(raw, job, logger, rejectOversized)
+        return raw === null ? null : validateSummary(raw, job, logger, rejectOversized, maxSummaryChars)
     } catch (error) {
         logger.warn("Summary job failed", {
             sessionKey,
@@ -408,6 +412,7 @@ function validateSummary(
     job: BoundarySummaryJob,
     logger: Logger,
     rejectOversized = false,
+    maxSummaryChars = MAX_SUMMARY_CHARS,
 ): string | null {
     const summary = text.trim()
     const lines = summary.split(/\r\n|\n|\r/).map((line) => line.trim())
@@ -426,19 +431,20 @@ function validateSummary(
         })
         return null
     }
-    if (rejectOversized && summary.length > MAX_SUMMARY_CHARS) {
+    if (rejectOversized && summary.length > maxSummaryChars) {
         logger.warn("Discarded overlong Better Compact chunk summary", {
             rangeStartMessageId: job.rangeStartMessageId,
             length: summary.length,
+            limit: maxSummaryChars,
         })
         return null
     }
-    return summary.length <= MAX_SUMMARY_CHARS
+    return summary.length <= maxSummaryChars
         ? summary
-        : truncateSummarySections(lines, headerIndexes)
+        : truncateSummarySections(lines, headerIndexes, maxSummaryChars)
 }
 
-function truncateSummarySections(lines: string[], headerIndexes: number[]): string {
+function truncateSummarySections(lines: string[], headerIndexes: number[], maxChars: number): string {
     const bodies = headerIndexes.map((headerIndex, index) => {
         const nextHeaderIndex = headerIndexes[index + 1] ?? lines.length
         return lines
@@ -452,7 +458,7 @@ function truncateSummarySections(lines: string[], headerIndexes: number[]): stri
         ).join("\n\n")
 
     let summary = render()
-    while (summary.length > MAX_SUMMARY_CHARS) {
+    while (summary.length > maxChars) {
         let longestBodyIndex = 0
         for (let index = 1; index < bodies.length; index++) {
             if (bodies[index].length > bodies[longestBodyIndex].length) {
@@ -460,7 +466,7 @@ function truncateSummarySections(lines: string[], headerIndexes: number[]): stri
             }
         }
 
-        const overflow = summary.length - MAX_SUMMARY_CHARS
+        const overflow = summary.length - maxChars
         const retainedLength = Math.max(0, bodies[longestBodyIndex].length - overflow)
         let body = bodies[longestBodyIndex].slice(0, retainedLength).trimEnd()
         const lineBoundary = body.lastIndexOf("\n")

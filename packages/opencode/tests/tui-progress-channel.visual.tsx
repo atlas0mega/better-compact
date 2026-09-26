@@ -21,6 +21,7 @@ const {
     completeBoundaryJob,
 } = await import("../lib/boundary/progress")
 const { openProgressModal } = await import("../lib/tui/modals")
+const { loadBoundaryJob } = await import("../lib/tui/data")
 const { PLUGIN_VERSION } = await import("../lib/version")
 
 const theme = {
@@ -139,4 +140,33 @@ test("server progress reaches the modal through real persisted state", async () 
         currentClose?.()
         rmSync(storageHome, { recursive: true, force: true })
     }
+})
+
+test("a queued busy-turn request remains a matching live job until the server starts", async () => {
+    const sessionId = "ses_queued_progress_channel"
+    const state = createSessionState(sessionId)
+    const jobId = "bc_queued_progress_test"
+    const startedAt = Date.now()
+    state.boundary.queuedManual = {
+        jobId,
+        jobStartedAt: startedAt,
+        requestedAt: startedAt,
+        currentTokens: 429_000,
+        contextLimit: 650_000,
+    }
+    await saveSessionState(state, logger)
+    const waiting = await loadBoundaryJob(sessionId)
+    expect(waiting?.id).toBe(jobId)
+    expect(waiting?.status).toBe("running")
+    expect(waiting?.currentStage).toContain("Queued")
+    expect(waiting?.counters.currentTokens).toBe(429_000)
+
+    state.boundary.queuedManual = undefined
+    startBoundaryJob(state, { sessionId, id: jobId, startedAt })
+    setBoundaryStage(state, "load", "completed", "History loaded")
+    await saveSessionState(state, logger)
+    const active = await loadBoundaryJob(sessionId)
+    expect(active?.id).toBe(jobId)
+    expect(active?.stages[0].status).toBe("completed")
+    rmSync(storageHome, { recursive: true, force: true })
 })

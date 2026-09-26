@@ -7,16 +7,19 @@ import { filterMessages, filterMessagesInPlace } from "./messages/shape"
 import { handleContextCommand, handleHelpCommand, handleStatsCommand } from "./commands"
 import { type HostPermissionSnapshot } from "./host-permissions"
 import { compressPermission, syncCompressPermissionState } from "./compress-permission"
-import { saveSessionState } from "./state"
+import { loadSessionState, saveSessionState } from "./state"
 import {
     buildBoundaryContextPlan,
     buildPrefixChunks,
     adaptiveTailUserTurns,
+    efficientAgenticTailBudget,
     findMatchingBoundaryPlan,
     formatBoundaryReport,
     appendBoundaryLog,
     applyBoundaryPlanSnapshot,
+    upgradeBoundaryPlanFingerprint,
     completeBoundaryJob,
+    createBoundaryJob,
     failBoundaryJob,
     processBoundaryTransform,
     setBoundaryStage,
@@ -31,8 +34,205 @@ import {
     type BoundaryContextPlan,
 } from "./boundary"
 import { openCodeCodec } from "./codec"
-import { getCurrentParams, getCurrentTokenUsage } from "./token-utils"
+import { hasOpenAIEncryptedReasoning } from "./context-estimate"
+import {
+    archiveBoundaryDelta,
+    archiveOversizedSummary,
+    eligibleRetirementThrough,
+    expireArchives,
+    liveArchiveDescriptions,
+    loadArchiveCatalog,
+    pendingArchiveSessionIds,
+    projectArchiveRoots,
+    recordArchiveFailure,
+    saveArchiveCatalog,
+} from "./boundary/archive-catalog"
+import {
+    summarizeArchiveBoundary,
+    summarizePendingArchiveDescriptions,
+} from "./boundary/archive-summarizer"
+import { PREFIX_CHUNK_VERSION, retainArchivedUserText } from "./boundary/engine"
+import { getCurrentParams, getCurrentTokenUsage, getCurrentUsageMessageId } from "./token-utils"
 import { sendIgnoredMessage } from "./ui/notification"
+import { getLastUserMessage } from "./messages/query"
+
+/** Exceptions from the provider or filesystem may embed private prompt text. */
+export function safeCompactionFailure(error: unknown): string {
+    const message = error instanceof Error ? error.message : ""
+    if (
+        /^(?:model_limit_unknown|input_does_not_fit|permission_denied|archive_io_error|invalid_output|missing_chunk|valid_but_not_smaller)$/.test(
+            message,
+        )
+    )
+        return message
+    return "unexpected_error"
+}
+
+async function sessionIsBusy(client: any, sessionId: string): Promise<boolean> {
+    if (typeof client?.session?.status !== "function") return false
+    try {
+        const response = await client.session.status()
+        return (
+            (response?.data ?? response)?.[sessionId]?.type === "busy" ||
+            (response?.data ?? response)?.[sessionId]?.type === "retry"
+        )
+    } catch {
+        // Older hosts without a working status endpoint keep the legacy path.
+        return false
+    }
+}
+
+async function queueManualIfBusy(
+    client: any,
+    state: SessionState,
+    messages: WithParts[],
+    logger: Logger,
+    jobId?: string,
+    jobStartedAt?: number,
+    params?: {
+        providerId: string | undefined
+        modelId: string | undefined
+        agent: string | undefined
+        variant: string | undefined
+    },
+    overrides?: Pick<
+        NonNullable<SessionState["boundary"]["queuedManual"]>,
+        "compaction" | "contextLimit" | "currentTokens" | "summaryVariant"
+    >,
+): Promise<boolean> {
+    if (!state.sessionId || !(await sessionIsBusy(client, state.sessionId))) return false
+    if (state.boundary.queuedManual?.phase === "running") return false
+    const job = createBoundaryJob({
+        sessionId: state.sessionId,
+        id: jobId,
+        startedAt: jobStartedAt,
+    })
+    state.boundary.queuedManual ??= {
+        requestedAt: Date.now(),
+        jobId: job.id,
+        jobStartedAt: job.startedAt,
+        lastUserMessageId: getLastUserMessage(messages)?.info.id,
+        params,
+        ...overrides,
+    }
+    await saveSessionState(state, logger)
+    return true
+}
+
+type ManualIntent = NonNullable<SessionState["boundary"]["queuedManual"]>
+
+function manualIntent(
+    sessionId: string,
+    messages: WithParts[],
+    options: Partial<ManualIntent> = {},
+): ManualIntent {
+    const job = createBoundaryJob({
+        sessionId,
+        id: options.jobId,
+        startedAt: options.jobStartedAt,
+    })
+    return {
+        ...options,
+        requestedAt: options.requestedAt ?? Date.now(),
+        lastUserMessageId: getLastUserMessage(messages)?.info.id,
+        jobId: job.id,
+        jobStartedAt: job.startedAt,
+    }
+}
+
+async function runManualWithIntent(
+    input: Omit<Parameters<typeof runBetterCompact>[0], "jobId" | "jobStartedAt"> & {
+        intent: ManualIntent
+    },
+): Promise<void> {
+    const { intent, ...jobInput } = input
+    input.state.boundary.queuedManual = { ...intent, phase: "running" }
+    await saveSessionState(input.state, input.logger)
+    try {
+        await runBetterCompact({
+            ...jobInput,
+            jobId: intent.jobId,
+            jobStartedAt: intent.jobStartedAt,
+        })
+    } finally {
+        // On a normal success or failure this intent is finished. A process
+        // crash never reaches this write, leaving a recoverable record.
+        input.state.boundary.queuedManual = undefined
+        await saveSessionState(input.state, input.logger)
+    }
+}
+
+async function runQueuedManual(input: {
+    client: any
+    runtime: RuntimeState
+    state: SessionState
+    logger: Logger
+    config: PluginConfig
+    directory: string
+    sessionId: string
+    messages: WithParts[]
+    beforeRequest: boolean
+}): Promise<void> {
+    const queued = input.state.boundary.queuedManual
+    if (!queued) return
+    const existing = input.state.boundary.activePlan
+    if (queued.phase === "recovery" && existing && existing.createdAt >= queued.requestedAt) {
+        const params = queued.params ?? getCurrentParams(input.state, input.messages, input.logger)
+        const resolved = resolveModelConfig(input.config, params.providerId, params.modelId)
+        const profile = resolveCompactionProfile(resolved, queued.compaction)
+        const target =
+            resolved.compaction.targetTokens ??
+            Math.floor((existing.contextLimit * profile.targetPercent) / 100)
+        if (existing.afterPruneTokens <= target) {
+            const replay = structuredClone(input.messages)
+            if (applyBoundaryPlanSnapshot(replay, existing, { allowRegrown: true })) {
+                input.state.boundary.queuedManual = undefined
+                completeBoundaryJob(input.state, "Recovered existing Better Compact plan")
+                await saveSessionState(input.state, input.logger)
+                return
+            }
+        }
+    }
+    // Model limits are runtime-only. Resolve them again after a restart before
+    // rebuilding a saved manual request, rather than using the 200K fallback.
+    if (queued.phase === "recovery" && !queued.contextLimit) {
+        const params = queued.params ?? getCurrentParams(input.state, input.messages, input.logger)
+        input.state.modelContextLimit =
+            params.providerId && params.modelId
+                ? await input.runtime.resolveModelLimit(params.providerId, params.modelId)
+                : undefined
+        if (!input.state.modelContextLimit) {
+            input.logger.warn("Better Compact recovery awaits a known model limit", {
+                sessionId: input.sessionId,
+            })
+            return
+        }
+    }
+    const started = input.runtime.startCompaction(input.sessionId, async () => {
+        await runManualWithIntent({
+            client: input.client,
+            runtime: input.runtime,
+            state: input.state,
+            logger: input.logger,
+            config: input.config,
+            workingDirectory: input.directory,
+            sessionId: input.sessionId,
+            messages: input.messages,
+            intent: queued,
+            params: queued.params,
+            compaction: queued.compaction,
+            contextLimit: queued.contextLimit,
+            currentTokens: queued.currentTokens,
+            summaryVariant: queued.summaryVariant,
+            silent: input.beforeRequest || queued.phase === "recovery",
+        })
+    })
+    if (!started) {
+        await input.runtime.activeCompaction(input.sessionId)?.catch(() => {})
+        return
+    }
+    await input.runtime.activeCompaction(input.sessionId)
+}
 
 export function createSystemPromptHandler(
     runtime: RuntimeState,
@@ -91,7 +291,90 @@ export function createChatMessageTransformHandler(
             return
         }
 
-        const state = await runtime.prepare(sessionId, messages)
+        // Manual jobs launched from the command/TUI hooks run independently of
+        // OpenCode's provider loop. The transform is the last gate before that
+        // loop sends its request: do not read/replay a plan while such a job is
+        // still changing it, even when automatic planning is below trigger.
+        const pendingCompaction = runtime.activeCompaction(sessionId)
+        if (pendingCompaction)
+            await pendingCompaction.catch((error) => {
+                logger.warn("Background Better Compact failed before request", {
+                    error: safeCompactionFailure(error),
+                })
+            })
+        const state = await runtime.prepare(sessionId, messages).catch((error) => {
+            logger.warn("Better Compact state unavailable; request continues", {
+                error: safeCompactionFailure(error),
+            })
+            return undefined
+        })
+        if (!state) return
+        const archiveCatalog = await expireArchives(workingDirectory, sessionId).catch((error) => {
+            logger.warn("Could not expire Better Compact archives before request", {
+                sessionId,
+                error: error instanceof Error ? error.name : "unknown",
+            })
+            return null
+        })
+        // A job can start while prepare/catalog I/O is in progress. Wait for
+        // its committed plan before reading or updating the saved snapshot.
+        const concurrentCompaction = runtime.activeCompaction(sessionId)
+        if (concurrentCompaction)
+            await concurrentCompaction.catch((error) => {
+                logger.warn("Background Better Compact failed during request preparation", {
+                    error: safeCompactionFailure(error),
+                })
+            })
+        if (
+            archiveCatalog &&
+            state.boundary.activePlan &&
+            state.boundary.activePlan.archiveCatalogText !== undefined &&
+            archiveCatalog.entries.some(
+                (entry) =>
+                    entry.status === "expired" &&
+                    state.boundary.activePlan?.archiveCatalogText?.includes(entry.id),
+            )
+        ) {
+            state.boundary.activePlan.archiveCatalogText = liveArchiveDescriptions(archiveCatalog)
+            await saveSessionState(state, logger)
+        }
+        const queued = state.boundary.queuedManual
+        // A queued manual compaction belongs to the end of the assistant's
+        // current turn: the message.updated handler flushes it there and
+        // session.idle is the fallback. This pre-request path is the
+        // last-resort fallback for a missed idle, so it only fires when a
+        // genuinely NEW user turn starts. Transcript growth with the same
+        // last user message is the current turn continuing and must not
+        // compact mid-turn.
+        if (queued && getLastUserMessage(messages)?.info.id !== queued.lastUserMessageId) {
+            syncCompressPermissionState(state, currentConfig, hostPermissions, messages)
+            if (
+                compressPermission(state, currentConfig) === "allow" &&
+                (!state.isSubAgent || currentConfig.experimental.allowSubAgents)
+            ) {
+                try {
+                    await runQueuedManual({
+                        client,
+                        runtime,
+                        state,
+                        logger,
+                        config: currentConfig,
+                        directory: workingDirectory,
+                        sessionId,
+                        messages,
+                        beforeRequest: true,
+                    })
+                } catch (error) {
+                    logger.warn("Queued Better Compact failed before request; continuing", {
+                        sessionId,
+                        error: error instanceof Error ? error.name : "unknown",
+                    })
+                }
+            } else {
+                state.boundary.queuedManual = undefined
+                await saveSessionState(state, logger)
+            }
+        }
         const currentParams = getCurrentParams(state, messages, logger)
         currentConfig = resolveModelConfig(
             currentConfig,
@@ -106,8 +389,17 @@ export function createChatMessageTransformHandler(
         }
 
         syncCompressPermissionState(state, currentConfig, hostPermissions, messages)
+        const preTransformEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
 
         if (state.isSubAgent && !currentConfig.experimental.allowSubAgents) {
+            await recordAutomaticCheck(
+                state,
+                logger,
+                "subagent_disabled",
+                messages,
+                currentConfig,
+                preTransformEstimate,
+            )
             return
         }
 
@@ -120,36 +412,185 @@ export function createChatMessageTransformHandler(
                 messages,
                 workingDirectory,
                 logger,
+                async (id) => {
+                    const response = await client.session.get({
+                        path: { id },
+                        query: { directory: workingDirectory },
+                    })
+                    const info = response?.data ?? response
+                    return typeof info?.title === "string" ? info.title : undefined
+                },
             )
             if (inherited) {
                 state.boundary.activePlan = inherited
                 await saveSessionState(state, logger).catch((error) => {
                     logger.warn("Failed to persist inherited Better Compact plan", {
-                        error: error instanceof Error ? error.message : String(error),
+                        error: safeCompactionFailure(error),
                     })
                 })
             }
         }
 
-        const automaticAllowed =
-            currentConfig.compaction.automatic && effectivePermission === "allow"
-        if (automaticAllowed) {
-            await runAutomaticTransform({
-                client,
-                runtime,
-                state,
-                logger,
-                config: currentConfig,
-                workingDirectory,
-                sessionId,
-                messages,
-                params: currentParams,
-            })
-        } else if (state.boundary.activePlan && effectivePermission !== "deny") {
-            // Automatic replanning is off; a stale-but-valid plan still beats
-            // sending raw history.
-            applyBoundaryPlanSnapshot(messages, state.boundary.activePlan, { allowRegrown: true })
+        // Idle normally builds a plan from the provider's completed usage.
+        // The pre-provider seam must also be able to compact a long tool loop
+        // when the host has not emitted idle since that response.
+        const originalMessages = state.boundary.activePlan ? structuredClone(messages) : undefined
+        let replayed = false
+        if (state.boundary.activePlan && effectivePermission !== "deny") {
+            try {
+                replayed = applyBoundaryPlanSnapshot(messages, state.boundary.activePlan, {
+                    allowRegrown: true,
+                })
+            } catch (error) {
+                if (originalMessages) messages.splice(0, messages.length, ...originalMessages)
+                logger.warn("Better Compact replay unavailable; attempting recovery", {
+                    error: safeCompactionFailure(error),
+                })
+            }
+            if (replayed && originalMessages) {
+                const previous = state.boundary.activePlan
+                const upgraded = upgradeBoundaryPlanFingerprint(originalMessages, previous)
+                if (upgraded) {
+                    state.boundary.activePlan = upgraded
+                    await saveSessionState(state, logger).catch(() => {
+                        if (state.boundary.activePlan === upgraded)
+                            state.boundary.activePlan = previous
+                    })
+                }
+            }
         }
+        const providerTokens = getCurrentTokenUsage(state, originalMessages ?? messages)
+        const usageMessageId = getCurrentUsageMessageId(state, originalMessages ?? messages)
+        const contextLimit = state.modelContextLimit ?? 0
+        const profile = resolveCompactionProfile(currentConfig)
+        const triggerTokens =
+            currentConfig.compaction.triggerTokens ??
+            Math.floor((contextLimit * profile.triggerPercent) / 100)
+        const targetTokens =
+            currentConfig.compaction.targetTokens ??
+            Math.floor((contextLimit * profile.targetPercent) / 100)
+        const cached = state.boundary.activePlan
+        const invalidCachedReplay = !!cached && !replayed
+        const outgoingEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
+        const legacyUnpricedReasoning =
+            !!cached &&
+            cached.reasoningMetadataPriced !== true &&
+            hasOpenAIEncryptedReasoning(messages) &&
+            outgoingEstimate > targetTokens
+        const policyChanged =
+            !!cached &&
+            (cached.contextLimit !== contextLimit ||
+                cached.triggerTokens !== triggerTokens ||
+                cached.targetTokens !== targetTokens ||
+                cached.recentReasoningBudgetTokens !== profile.recentReasoningTokens ||
+                cached.recentAssistantOutputs !== 5 ||
+                cached.prefixSummaryAllowed !== profile.prefixSummary ||
+                cached.collapsePercent !== profile.collapsePercent ||
+                legacyUnpricedReasoning)
+        const needsPreRequestPlan =
+            effectivePermission === "allow" &&
+            (invalidCachedReplay ||
+                (currentConfig.compaction.automatic &&
+                    contextLimit > 0 &&
+                    // Provider usage is the ordinary trigger. A stale-policy
+                    // plan or hard overflow must be settled before the request.
+                    (policyChanged ||
+                        (providerTokens >= triggerTokens &&
+                            usageMessageId !== state.boundary.lastPlannedUsageMessageId) ||
+                        outgoingEstimate >= contextLimit)))
+        let outcome = replayed
+            ? "plan_replayed"
+            : effectivePermission === "deny"
+              ? "permission_denied"
+              : effectivePermission === "ask"
+                ? "permission_ask"
+                : currentConfig.compaction.automatic && contextLimit <= 0
+                  ? "model_limit_unknown"
+                  : currentConfig.compaction.automatic
+                    ? "awaiting_idle"
+                    : "automatic_off"
+        if (needsPreRequestPlan) {
+            if (contextLimit <= 0) {
+                outcome = "model_limit_unknown"
+            } else {
+                const source = originalMessages ?? structuredClone(messages)
+                const attempt = () =>
+                    runAutomaticTransform({
+                        client,
+                        runtime,
+                        state,
+                        logger,
+                        config: currentConfig,
+                        workingDirectory,
+                        sessionId,
+                        messages,
+                        params: currentParams,
+                        forceOverflow: outgoingEstimate >= contextLimit,
+                        forceInvalidReplay: invalidCachedReplay,
+                        forceMetadataReprice: legacyUnpricedReasoning,
+                    })
+                const restore = () =>
+                    messages.splice(0, messages.length, ...structuredClone(source))
+                const replayLatest = () => {
+                    if (!state.boundary.activePlan) return false
+                    try {
+                        return applyBoundaryPlanSnapshot(messages, state.boundary.activePlan, {
+                            allowRegrown: true,
+                        })
+                    } catch (error) {
+                        logger.warn("Better Compact replay remains unavailable", {
+                            error: safeCompactionFailure(error),
+                        })
+                        return false
+                    }
+                }
+                if (originalMessages) restore()
+                outcome = await attempt()
+                // Only retry when the first attempt failed AND there is no
+                // replayable plan. Never re-bill a committed successful plan.
+                if (outcome === "engine_error") {
+                    restore()
+                    if (replayLatest()) outcome = "plan_replayed"
+                    else {
+                        restore()
+                        outcome = await attempt()
+                    }
+                }
+                if (
+                    outcome === "engine_error" ||
+                    outcome === "replay_invalid" ||
+                    (invalidCachedReplay && outcome === "no_new_plan")
+                ) {
+                    restore()
+                    if (replayLatest()) outcome = "plan_replayed"
+                    else {
+                        restore()
+                        outcome = invalidCachedReplay ? "replay_invalid" : outcome
+                    }
+                }
+                const finalEstimate = openCodeCodec.estimateTurns(openCodeCodec.encode(messages))
+                if (finalEstimate >= contextLimit) {
+                    outcome = "overflow_unresolved"
+                }
+            }
+            // A failed replay may mean the archived source really changed. If
+            // neither attempt can safely replan it, send the unchanged native
+            // history rather than strand the user's ongoing task.
+            if (["engine_error", "replay_invalid", "overflow_unresolved"].includes(outcome)) {
+                logger.warn("Better Compact could not compact before request; continuing", {
+                    sessionId,
+                    reason: outcome,
+                })
+            }
+        }
+        await recordAutomaticCheck(
+            state,
+            logger,
+            outcome,
+            messages,
+            currentConfig,
+            outgoingEstimate,
+        )
 
         if (state.sessionId) {
             await logger.saveContext(state.sessionId, messages)
@@ -159,7 +600,7 @@ export function createChatMessageTransformHandler(
 
 // One automatic compaction at a time per session: the winner builds and
 // commits the plan; a concurrent transform waits and replays the committed
-// plan onto its own request. Any failure degrades to an unpruned request.
+// plan onto its own request. Failed jobs do not block the host provider loop.
 async function runAutomaticTransform(input: {
     client: any
     runtime: RuntimeState
@@ -170,9 +611,15 @@ async function runAutomaticTransform(input: {
     sessionId: string
     messages: WithParts[]
     params: ReturnType<typeof getCurrentParams>
-}): Promise<void> {
+    forceOverflow?: boolean
+    forceInvalidReplay?: boolean
+    forceMetadataReprice?: boolean
+}): Promise<string> {
     try {
+        const usageMessageId = getCurrentUsageMessageId(input.state, input.messages)
+        let liveHandoffCalls = 0
         let planned: BoundaryContextPlan | null = null
+        let replayed = false
         const started = input.runtime.startCompaction(input.sessionId, async () => {
             planned = await processBoundaryTransform({
                 state: input.state,
@@ -181,47 +628,71 @@ async function runAutomaticTransform(input: {
                 directory: input.workingDirectory,
                 messages: input.messages,
                 providerReportedTokens: getCurrentTokenUsage(input.state, input.messages),
-                summariesAllowed: input.config.compaction.summaryEffort !== "off",
-                summarize: (jobs) =>
-                    summarizeBoundaryJobs({
+                forceOverflow: input.forceOverflow,
+                forceInvalidReplay: input.forceInvalidReplay,
+                forceMetadataReprice: input.forceMetadataReprice,
+                onOutcome: (outcome) => {
+                    replayed = outcome === "replayed"
+                },
+                summariesAllowed: true,
+                summarizeArchive: async (plan, _turns, catalog) => {
+                    const result = await summarizeArchiveBoundary({
                         client: input.client,
                         runtime: input.runtime,
                         logger: input.logger,
-                        parentSessionId: input.sessionId,
-                        jobs,
-                        params: input.params,
-                        summaryEffort: input.config.compaction.summaryEffort,
-                        summaryModel: input.config.compaction.summaryModel,
-                        concurrency: resolveCompactionProfile(input.config).summarizerConcurrency,
-                    }),
-                summarizePrefix: (plan, turns) =>
-                    summarizePrefixChunks({
-                        client: input.client,
-                        runtime: input.runtime,
-                        logger: input.logger,
-                        parentSessionId: input.sessionId,
+                        directory: input.workingDirectory,
+                        sessionId: input.sessionId,
+                        catalog,
+                        messages: input.messages,
                         plan,
-                        turns,
                         params: input.params,
                         summaryModel: input.config.compaction.summaryModel,
-                        summaryEffort: input.config.compaction.summaryEffort,
-                        concurrency: resolveCompactionProfile(input.config).summarizerConcurrency,
-                    }),
+                        summaryEffort: "high",
+                    })
+                    liveHandoffCalls = result.calls
+                    return result
+                },
             })
         })
         const active = input.runtime.activeCompaction(input.sessionId)
         if (!started) {
             await active?.catch(() => {})
             const latestPlan = input.state.boundary.activePlan
-            if (latestPlan) {
-                applyBoundaryPlanSnapshot(input.messages, latestPlan, { allowRegrown: true })
-            }
-            return
+            return latestPlan &&
+                applyBoundaryPlanSnapshot(input.messages, latestPlan, {
+                    allowRegrown: true,
+                })
+                ? "compaction_inflight"
+                : "replay_invalid"
         }
         if (active) await active
+        if ((planned || replayed) && usageMessageId) {
+            input.state.boundary.lastPlannedUsageMessageId = usageMessageId
+            await saveSessionState(input.state, input.logger)
+        }
+        if (planned)
+            scheduleArchiveDescriptions({
+                client: input.client,
+                runtime: input.runtime,
+                logger: input.logger,
+                directory: input.workingDirectory,
+                sessionId: input.sessionId,
+                params: input.params,
+                summaryModel: input.config.compaction.summaryModel,
+                maxCalls: Math.max(0, 7 - liveHandoffCalls),
+            })
         if (planned) await showAutomaticCompactionToast(input.client, planned)
+        if (planned) return "planned"
+        if (replayed) return "plan_replayed"
+        return input.state.boundary.activePlan
+            ? applyBoundaryPlanSnapshot(input.messages, input.state.boundary.activePlan, {
+                  allowRegrown: true,
+              })
+                ? "plan_replayed"
+                : "replay_invalid"
+            : "no_new_plan"
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = safeCompactionFailure(error)
         input.logger.error("Automatic Better Compact failed; request continues unpruned", {
             error: message,
         })
@@ -235,7 +706,118 @@ async function runAutomaticTransform(input: {
                 },
             })
         } catch {}
+        return "engine_error"
     }
+}
+
+const backgroundDescriptions = new Map<string, Promise<void>>()
+
+function scheduleArchiveDescriptions(
+    input: Parameters<typeof summarizePendingArchiveDescriptions>[0],
+): Promise<void> {
+    if (input.maxCalls <= 0) return Promise.resolve()
+    const key = `${input.directory}\0${input.sessionId}`
+    const existing = backgroundDescriptions.get(key)
+    if (existing) return existing
+    const work = summarizePendingArchiveDescriptions(input)
+        .then(() => {})
+        .catch((error) => {
+            input.logger.warn("Background archive description failed", {
+                sessionId: input.sessionId,
+                error: error instanceof Error ? error.name : "unknown",
+            })
+        })
+        .finally(() => backgroundDescriptions.delete(key))
+    backgroundDescriptions.set(key, work)
+    return work
+}
+
+/** Best-effort, bounded startup backfill. Never mutates a live plan mid-turn. */
+export async function startArchiveDescriptionBackfill(input: {
+    client: any
+    runtime: RuntimeState
+    logger: Logger
+    directory: string
+    summaryModel?: string | null
+}): Promise<void> {
+    if (!input.summaryModel) return
+    const projects = await projectArchiveRoots(input.directory)
+    const sessions = (
+        await Promise.all(
+            projects.map(async (directory) =>
+                (await pendingArchiveSessionIds(directory)).map((sessionId) => ({
+                    directory,
+                    sessionId,
+                })),
+            ),
+        )
+    ).flat()
+    let next = 0
+    await Promise.all(
+        Array.from({ length: Math.min(2, sessions.length) }, async () => {
+            while (next < sessions.length) {
+                const { directory, sessionId } = sessions[next++]
+                await scheduleArchiveDescriptions({
+                    ...input,
+                    directory,
+                    sessionId,
+                    params: {
+                        providerId: undefined,
+                        modelId: undefined,
+                        agent: undefined,
+                        variant: undefined,
+                    },
+                    maxCalls: 7,
+                })
+            }
+        }),
+    )
+}
+
+/** Persist only numbers and reason codes; never log message text or model output. */
+async function recordAutomaticCheck(
+    state: SessionState,
+    logger: Logger,
+    reason: string,
+    messages: WithParts[],
+    config: PluginConfig,
+    estimatedTokens: number,
+    seam: "pre_request" | "idle" = "pre_request",
+): Promise<void> {
+    const previous = state.boundary.automaticCheck
+    const providerTokens = getCurrentTokenUsage(state, messages)
+    const contextLimit = state.modelContextLimit ?? null
+    const profile = resolveCompactionProfile(config)
+    const triggerTokens =
+        config.compaction.triggerTokens ??
+        (contextLimit ? Math.floor((contextLimit * profile.triggerPercent) / 100) : 0)
+    const effectiveReason =
+        reason === "no_new_plan" && !contextLimit
+            ? "model_limit_unknown"
+            : reason === "no_new_plan" && Math.max(providerTokens, estimatedTokens) < triggerTokens
+              ? "below_trigger"
+              : reason === "no_new_plan"
+                ? "no_eligible_boundary"
+                : reason
+    state.boundary.automaticCheck = {
+        at: new Date().toISOString(),
+        count: (previous?.count ?? 0) + 1,
+        seam,
+        reason: effectiveReason,
+        providerTokens,
+        estimatedTokens,
+        triggerTokens,
+        contextLimit,
+    }
+    if (
+        previous?.reason !== effectiveReason ||
+        previous?.seam !== seam ||
+        (Math.max(providerTokens, estimatedTokens) >= triggerTokens &&
+            state.boundary.automaticCheck.count % 8 === 0)
+    ) {
+        await saveSessionState(state, logger).catch(() => {})
+    }
+    logger.debug("Automatic compaction check", state.boundary.automaticCheck)
 }
 
 async function showAutomaticCompactionToast(client: any, plan: BoundaryContextPlan): Promise<void> {
@@ -332,9 +914,27 @@ export function createCommandExecuteHandler(
             }
 
             if (subcommand === "compress") {
+                if (await queueManualIfBusy(client, state, messages, logger)) {
+                    try {
+                        await client.tui.showToast({
+                            body: {
+                                title: "Better Compact queued",
+                                message: "Will compact after this turn finishes.",
+                                variant: "info",
+                                duration: 5000,
+                            },
+                        })
+                    } catch {}
+                    output.parts.length = 0
+                    return
+                }
+                const intent = manualIntent(input.sessionID, messages, {
+                    params: { ...getCurrentParams(state, messages, logger), variant: undefined },
+                    contextLimit: state.modelContextLimit,
+                })
                 const started = runtime.startCompaction(input.sessionID, async () => {
                     try {
-                        await runBetterCompact({
+                        await runManualWithIntent({
                             client,
                             runtime,
                             state,
@@ -343,10 +943,12 @@ export function createCommandExecuteHandler(
                             workingDirectory,
                             sessionId: input.sessionID,
                             messages,
+                            intent,
+                            params: intent.params,
                         })
                     } catch (error) {
                         logger.error("Better Compact command job failed", {
-                            error: error instanceof Error ? error.message : String(error),
+                            error: safeCompactionFailure(error),
                         })
                     }
                 })
@@ -413,6 +1015,13 @@ export function createChatMessageHandler(
         const messageModel = output.message?.model
         const providerID = input.model?.providerID ?? messageModel?.providerID
         const modelID = input.model?.modelID ?? messageModel?.modelID
+        const requestedChatVariant = validSummaryVariant(sentinel.metadata?.chatVariant)
+        const chatVariant =
+            requestedChatVariant &&
+            providerID === sentinel.metadata?.chatProviderID &&
+            modelID === sentinel.metadata?.chatModelID
+                ? requestedChatVariant
+                : (input.variant ?? output.message?.variant)
         const summaryVariant =
             requestedSummaryVariant &&
             providerID === sentinel.metadata?.summaryProviderID &&
@@ -437,9 +1046,59 @@ export function createChatMessageHandler(
             return
         }
 
+        if (
+            await queueManualIfBusy(
+                client,
+                state,
+                messages,
+                logger,
+                jobId,
+                jobStartedAt,
+                {
+                    providerId: providerID,
+                    modelId: modelID,
+                    agent: input.agent ?? output.message?.agent,
+                    variant: chatVariant,
+                },
+                {
+                    compaction: sentinel.metadata?.compaction as
+                        Partial<CompactionConfig> | undefined,
+                    contextLimit,
+                    currentTokens,
+                    summaryVariant,
+                },
+            )
+        ) {
+            try {
+                await client.tui.showToast({
+                    body: {
+                        title: "Better Compact queued",
+                        message: "Will compact after this turn finishes.",
+                        variant: "info",
+                        duration: 5000,
+                    },
+                })
+            } catch {}
+            return
+        }
+
+        const intent = manualIntent(input.sessionID, messages, {
+            jobId,
+            jobStartedAt,
+            params: {
+                providerId: providerID,
+                modelId: modelID,
+                agent: input.agent ?? output.message?.agent,
+                variant: chatVariant,
+            },
+            compaction: sentinel.metadata?.compaction as Partial<CompactionConfig> | undefined,
+            contextLimit,
+            currentTokens,
+            summaryVariant,
+        })
         const started = runtime.startCompaction(input.sessionID, async () => {
             try {
-                await runBetterCompact({
+                await runManualWithIntent({
                     client,
                     runtime,
                     state,
@@ -448,23 +1107,16 @@ export function createChatMessageHandler(
                     workingDirectory,
                     sessionId: input.sessionID,
                     messages,
-                    params: {
-                        providerId: providerID,
-                        modelId: modelID,
-                        agent: input.agent ?? output.message?.agent,
-                        variant: input.variant ?? output.message?.variant,
-                    },
-                    compaction: sentinel.metadata?.compaction as
-                        Partial<CompactionConfig> | undefined,
-                    contextLimit,
-                    currentTokens,
-                    jobId,
-                    jobStartedAt,
-                    summaryVariant,
+                    intent,
+                    params: intent.params,
+                    compaction: intent.compaction,
+                    contextLimit: intent.contextLimit,
+                    currentTokens: intent.currentTokens,
+                    summaryVariant: intent.summaryVariant,
                 })
             } catch (error) {
                 logger.error("Better Compact TUI job failed", {
-                    error: error instanceof Error ? error.message : String(error),
+                    error: safeCompactionFailure(error),
                 })
             }
         })
@@ -504,12 +1156,17 @@ async function runBetterCompact(input: {
     jobId?: string
     jobStartedAt?: number
     summaryVariant?: string
+    silent?: boolean
 }): Promise<void> {
-    const params = input.params ?? getCurrentParams(input.state, input.messages, input.logger)
+    const params = input.params ?? {
+        ...getCurrentParams(input.state, input.messages, input.logger),
+        // A previous user message cannot prove the session's current TUI
+        // variant after an intervening variant switch.
+        variant: undefined,
+    }
     const effectiveConfig = resolveModelConfig(input.config, params.providerId, params.modelId)
     const profile = resolveCompactionProfile(effectiveConfig, input.compaction)
-    const summariesAllowed =
-        (input.compaction?.summaryEffort ?? effectiveConfig.compaction.summaryEffort) !== "off"
+    const summariesAllowed = true
     const contextLimit =
         input.contextLimit && input.contextLimit > 0
             ? input.contextLimit
@@ -547,7 +1204,11 @@ async function runBetterCompact(input: {
     }
 
     const previousActivePlan = input.state.boundary.activePlan
+    const previousPlannedUsage = input.state.boundary.lastPlannedUsageMessageId
+    const previousIdleUsage = input.state.boundary.lastIdleUsageMessageId
+    let liveHandoffCalls = 0
     try {
+        let catalog = await expireArchives(input.workingDirectory, input.sessionId)
         setBoundaryStage(input.state, "load", "running", "Reading current OpenCode session history")
         updateBoundaryCounters(input.state, { messages: input.messages.length })
         appendBoundaryLog(
@@ -575,7 +1236,7 @@ async function runBetterCompact(input: {
             profile.targetPercent,
             effectiveConfig.compaction.targetTokens,
         )
-        const plan = buildBoundaryContextPlan(input.messages, {
+        const planOptions: Parameters<typeof buildBoundaryContextPlan>[1] = {
             contextLimit,
             force: true,
             triggerRatio: profile.triggerPercent / 100,
@@ -583,12 +1244,28 @@ async function runBetterCompact(input: {
             triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
             targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
             recentToolResultBudgetTokens: profile.recentToolTokens,
+            recentReasoningBudgetTokens: profile.recentReasoningTokens,
             minTailUserTurns,
             prefixSummaryAllowed: profile.prefixSummary,
             collapsePercent: profile.collapsePercent,
             providerReportedTokens: reportedCurrentTokens,
             summariesAllowed,
+            archiveCatalogText: liveArchiveDescriptions(catalog),
+            archiveGeneration: catalog.entries.length,
+            retirementThrough: catalog.retirementThrough,
             priorPlan: input.state.boundary.activePlan ?? undefined,
+        }
+        const modelFirst = summariesAllowed && profile.prefixSummary
+        const tailBudgetTokens = efficientAgenticTailBudget(input.messages, {
+            ...planOptions,
+            prefixSummaryAllowed: modelFirst ? false : profile.prefixSummary,
+        })
+        const plan = buildBoundaryContextPlan(input.messages, {
+            ...planOptions,
+            prefixSummaryAllowed: modelFirst ? false : profile.prefixSummary,
+            deferPrefixConsolidation:
+                modelFirst && input.state.boundary.activePlan?.requiresCustomCompaction === true,
+            tailBudgetTokens,
         })
         if (!plan) {
             setBoundaryStage(input.state, "scan", "skipped", "No eligible historical context found")
@@ -629,6 +1306,15 @@ async function runBetterCompact(input: {
         setBoundaryStage(input.state, "transcript", "running", "Writing raw transcript reference")
         await saveProgress()
         await writeBoundaryTranscript(input.workingDirectory, plan, input.logger)
+        const archived = await archiveBoundaryDelta({
+            directory: input.workingDirectory,
+            sessionId: input.sessionId,
+            plan,
+            originalMessages: input.messages,
+        })
+        catalog = archived.catalog
+        plan.archiveGeneration = catalog.entries.length
+        plan.archiveCatalogText = liveArchiveDescriptions(catalog)
         updateBoundaryCounters(input.state, { archivedMessages: plan.transcript.messageIds.length })
         setBoundaryStage(
             input.state,
@@ -693,11 +1379,162 @@ async function runBetterCompact(input: {
         await saveProgress()
 
         let finalPlan = plan
-        const prefixChunks =
-            summariesAllowed && profile.prefixSummary && plan.afterPruneTokens > plan.targetTokens
-                ? buildPrefixChunks(plan)
-                : []
+        // The archive synthesis has one shared seven-call budget for source
+        // chunks, descriptions and handoff. Never also schedule the legacy
+        // per-turn/prefix calls during the same compaction.
+        const prefixChunks: ReturnType<typeof buildPrefixChunks> = []
         let prefixAttempted = false
+        if (
+            summariesAllowed &&
+            profile.prefixSummary &&
+            plan.afterPruneTokens > Math.floor(plan.targetTokens * 1.15) &&
+            catalog.entries.some((entry) => entry.status === "pending") &&
+            // A repeated command or a settings-only replan of the same raw
+            // range must not re-bill Luna for an already attempted boundary.
+            !!archived.entry
+        ) {
+            prefixAttempted = true
+            setBoundaryStage(
+                input.state,
+                "prefix-summary",
+                "running",
+                "Synthesizing archived task state and descriptions",
+            )
+            await saveProgress()
+            const result = await summarizeArchiveBoundary({
+                client: input.client,
+                runtime: input.runtime,
+                logger: input.logger,
+                directory: input.workingDirectory,
+                sessionId: input.sessionId,
+                catalog,
+                messages: input.messages,
+                plan,
+                params: { ...params, variant: input.summaryVariant ?? params.variant },
+                summaryModel: effectiveConfig.compaction.summaryModel,
+                summaryEffort: "high",
+            })
+            liveHandoffCalls = result.calls
+            updateBoundaryCounters(input.state, {
+                summaryJobsTotal: result.calls,
+                summaryJobsDone: result.calls,
+                summaryJobsSucceeded: result.ok ? result.calls : 0,
+                summaryJobsFailed: result.ok ? 0 : result.calls,
+            })
+            if (result.ok) {
+                const candidate = structuredClone(catalog)
+                candidate.checkpoint = result.handoff
+                candidate.validatedCheckpointId = candidate.entries.at(-1)?.id
+                const newest = candidate.entries.at(-1)
+                if (newest)
+                    candidate.retirementThrough = eligibleRetirementThrough(
+                        candidate,
+                        newest.sequence,
+                    )
+                const rebuilt = buildBoundaryContextPlan(input.messages, {
+                    contextLimit,
+                    force: true,
+                    prefixSummary: retainArchivedUserText(
+                        result.handoff,
+                        openCodeCodec.encode(input.messages),
+                        plan.rawTailStartIndex,
+                        candidate,
+                        candidate.retirementThrough,
+                        input.messages,
+                    ),
+                    archiveCatalogText: liveArchiveDescriptions(candidate),
+                    archiveGeneration: candidate.entries.length,
+                    retirementThrough: candidate.retirementThrough,
+                    triggerRatio: profile.triggerPercent / 100,
+                    targetRatio: profile.targetPercent / 100,
+                    triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
+                    targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
+                    recentToolResultBudgetTokens: profile.recentToolTokens,
+                    recentReasoningBudgetTokens: profile.recentReasoningTokens,
+                    minTailUserTurns,
+                    tailBudgetTokens,
+                    prefixSummaryAllowed: profile.prefixSummary,
+                    collapsePercent: profile.collapsePercent,
+                    providerReportedTokens: reportedCurrentTokens,
+                    summariesAllowed,
+                    priorPlan: modelFirst
+                        ? (input.state.boundary.activePlan ?? undefined)
+                        : toBoundaryPlanSnapshot(plan, input.messages),
+                })
+                if (
+                    rebuilt?.requiresCustomCompaction &&
+                    rebuilt.afterPruneTokens < plan.afterPruneTokens
+                ) {
+                    const latest = await loadArchiveCatalog(input.workingDirectory, input.sessionId)
+                    if (
+                        !candidate.entries.every((entry) =>
+                            latest.entries.some(
+                                (stored) =>
+                                    stored.id === entry.id && stored.checksum === entry.checksum,
+                            ),
+                        )
+                    )
+                        throw new Error("Archive catalog changed during handoff")
+                    latest.checkpoint = result.handoff
+                    latest.validatedCheckpointId = newest!.id
+                    latest.retirementThrough = candidate.retirementThrough
+                    await saveArchiveCatalog(input.workingDirectory, latest)
+                    catalog = latest
+                    finalPlan = rebuilt
+                } else if (candidate.entries.at(-1)) {
+                    await recordArchiveFailure(
+                        input.workingDirectory,
+                        catalog,
+                        "valid_but_not_smaller",
+                    )
+                    await archiveOversizedSummary(
+                        input.workingDirectory,
+                        catalog,
+                        candidate.entries.at(-1)!.id,
+                        result.handoff,
+                    )
+                }
+            } else {
+                await recordArchiveFailure(input.workingDirectory, catalog, result.reason)
+                appendBoundaryLog(
+                    input.state,
+                    `Archive synthesis unavailable: ${result.reason}; ${result.calls} calls.`,
+                )
+                if (result.oversized && catalog.entries.at(-1))
+                    await archiveOversizedSummary(
+                        input.workingDirectory,
+                        catalog,
+                        catalog.entries.at(-1)!.id,
+                        result.oversized,
+                    )
+            }
+            setBoundaryStage(
+                input.state,
+                "prefix-summary",
+                finalPlan === plan ? "failed" : "completed",
+                finalPlan === plan
+                    ? "Luna handoff unavailable; deterministic fallback remains available"
+                    : `Applied archive handoff: ${formatCompactTokens(plan.afterPruneTokens)} -> ${formatCompactTokens(finalPlan.afterPruneTokens)}`,
+            )
+            await saveProgress()
+        }
+        if (
+            modelFirst &&
+            finalPlan === plan &&
+            finalPlan.afterPruneTokens > Math.floor(finalPlan.targetTokens * 1.15)
+        ) {
+            const fallback = buildBoundaryContextPlan(input.messages, {
+                ...planOptions,
+                tailBudgetTokens,
+                prefixSummaryAllowed: profile.prefixSummary,
+                archiveCatalogText: liveArchiveDescriptions(catalog),
+                archiveGeneration: catalog.entries.length,
+                retirementThrough: catalog.retirementThrough,
+            })
+            if (fallback && fallback.afterPruneTokens < finalPlan.afterPruneTokens)
+                finalPlan = fallback
+        }
+        if (modelFirst) finalPlan.prefixSummaryAllowed = profile.prefixSummary
         if (prefixChunks.length > 0) {
             prefixAttempted = true
             setBoundaryStage(
@@ -748,6 +1585,7 @@ async function runBetterCompact(input: {
                     triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
                     targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
                     recentToolResultBudgetTokens: profile.recentToolTokens,
+                    recentReasoningBudgetTokens: profile.recentReasoningTokens,
                     minTailUserTurns,
                     prefixSummaryAllowed: profile.prefixSummary,
                     collapsePercent: profile.collapsePercent,
@@ -771,11 +1609,7 @@ async function runBetterCompact(input: {
             )
             await saveProgress()
         }
-        const activeJobs = prefixAttempted
-            ? []
-            : plan.requiresCustomCompaction
-              ? plan.summaryJobs.filter((job) => job.key.startsWith("prefix-summary:"))
-              : plan.summaryJobs
+        const activeJobs: typeof plan.summaryJobs = []
         if (activeJobs.length > 0) {
             const summaryStage = activeJobs.some((job) => !job.key.startsWith("prefix-summary:"))
                 ? "assistant-runs"
@@ -844,6 +1678,7 @@ async function runBetterCompact(input: {
                     triggerTokens: effectiveConfig.compaction.triggerTokens ?? undefined,
                     targetTokens: effectiveConfig.compaction.targetTokens ?? undefined,
                     recentToolResultBudgetTokens: profile.recentToolTokens,
+                    recentReasoningBudgetTokens: profile.recentReasoningTokens,
                     minTailUserTurns,
                     prefixSummaryAllowed: profile.prefixSummary,
                     collapsePercent: profile.collapsePercent,
@@ -904,8 +1739,20 @@ async function runBetterCompact(input: {
         setBoundaryStage(input.state, "store", "running", "Persisting virtual context plan")
         await saveProgress()
         storeBoundaryPlan(input.state, finalPlan, input.messages)
-        if (prefixAttempted && input.state.boundary.activePlan)
+        if (
+            input.state.boundary.activePlan &&
+            (prefixAttempted ||
+                (previousActivePlan?.rangeHash === finalPlan.rangeHash &&
+                    previousActivePlan.prefixChunkAttempted))
+        ) {
             input.state.boundary.activePlan.prefixChunkAttempted = true
+            input.state.boundary.activePlan.prefixChunkVersion = prefixAttempted
+                ? PREFIX_CHUNK_VERSION
+                : previousActivePlan?.prefixChunkVersion
+            input.state.boundary.activePlan.prefixChunkModel = prefixAttempted
+                ? (effectiveConfig.compaction.summaryModel ?? "inherit")
+                : previousActivePlan?.prefixChunkModel
+        }
         updateBoundaryCounters(input.state, {
             afterTokens: finalPlan.afterPruneTokens,
             currentTokens: finalPlan.afterPruneTokens,
@@ -914,20 +1761,43 @@ async function runBetterCompact(input: {
         })
         setBoundaryStage(input.state, "store", "completed", "Virtual context plan stored")
         appendBoundaryLog(input.state, "Stored Better Compact plan for future model requests.")
+        // The plan and its consumed provider reading must commit together. If
+        // the process exits during report publication, restart can reuse this
+        // exact prefix instead of replanning the same response.
+        const usageMessageId = getCurrentUsageMessageId(input.state, input.messages)
+        if (usageMessageId) {
+            input.state.boundary.lastPlannedUsageMessageId = usageMessageId
+            input.state.boundary.lastIdleUsageMessageId = usageMessageId
+        }
         await saveProgress()
 
         setBoundaryStage(input.state, "report", "running", "Publishing final report")
         await saveProgress()
-        await sendIgnoredMessage(
-            input.client,
-            input.sessionId,
-            formatBoundaryReport(finalPlan, getCurrentTokenUsage(input.state, input.messages)),
-            params,
-            input.logger,
-        )
+        if (!input.silent)
+            await sendIgnoredMessage(
+                input.client,
+                input.sessionId,
+                formatBoundaryReport(
+                    finalPlan,
+                    getCurrentTokenUsage(input.state, input.messages),
+                    input.state.boundary.job?.counters.summaryJobsDone ?? 0,
+                ),
+                params,
+                input.logger,
+            )
         setBoundaryStage(input.state, "report", "completed", "Final report published")
         completeBoundaryJob(input.state, "Complete")
         await saveSessionState(input.state, input.logger)
+        scheduleArchiveDescriptions({
+            client: input.client,
+            runtime: input.runtime,
+            logger: input.logger,
+            directory: input.workingDirectory,
+            sessionId: input.sessionId,
+            params,
+            summaryModel: effectiveConfig.compaction.summaryModel,
+            maxCalls: Math.max(0, 7 - liveHandoffCalls),
+        })
         input.logger.info("Better Compact virtual compaction plan stored", {
             sessionId: input.sessionId,
             rangeHash: finalPlan.rangeHash,
@@ -935,17 +1805,20 @@ async function runBetterCompact(input: {
         })
     } catch (error) {
         input.state.boundary.activePlan = previousActivePlan
-        const message = error instanceof Error ? error.message : String(error)
+        input.state.boundary.lastPlannedUsageMessageId = previousPlannedUsage
+        input.state.boundary.lastIdleUsageMessageId = previousIdleUsage
+        const message = safeCompactionFailure(error)
         appendBoundaryLog(input.state, `Failed: ${message}`)
         failBoundaryJob(input.state, message)
         await saveSessionState(input.state, input.logger).catch(() => {})
-        await sendIgnoredMessage(
-            input.client,
-            input.sessionId,
-            `Better Compact failed: ${message}`,
-            params,
-            input.logger,
-        )
+        if (!input.silent)
+            await sendIgnoredMessage(
+                input.client,
+                input.sessionId,
+                `Better Compact failed: ${message}`,
+                params,
+                input.logger,
+            )
         throw error
     }
 }
@@ -987,8 +1860,132 @@ export function createTextCompleteHandler() {
     }
 }
 
-export function createEventHandler(runtime: RuntimeState, logger: Logger) {
+export function createEventHandler(
+    runtime: RuntimeState,
+    logger: Logger,
+    client?: any,
+    config?: PluginConfig,
+    directory?: string,
+    hostPermissions?: HostPermissionSnapshot,
+    loadConfig: () => PluginConfig = () => config!,
+) {
     return async (input: { event: any }) => {
+        if (
+            input.event.type === "session.idle" &&
+            client &&
+            config &&
+            directory &&
+            hostPermissions
+        ) {
+            const sessionId = input.event.properties?.sessionID
+            if (typeof sessionId !== "string" || runtime.isScratch(sessionId)) return
+            try {
+                const response = await client.session.messages({ path: { id: sessionId } })
+                const messages = filterMessages(response.data ?? response)
+                const state = await runtime.prepare(sessionId, messages)
+                await expireArchives(directory, sessionId)
+                const currentConfig = loadConfig()
+                syncCompressPermissionState(state, currentConfig, hostPermissions, messages)
+                if (state.boundary.queuedManual) {
+                    if (compressPermission(state, currentConfig) !== "allow") {
+                        state.boundary.queuedManual = undefined
+                        await saveSessionState(state, logger)
+                        return
+                    }
+                    await runQueuedManual({
+                        client,
+                        runtime,
+                        state,
+                        logger,
+                        config: currentConfig,
+                        directory,
+                        sessionId,
+                        messages,
+                        beforeRequest: false,
+                    })
+                    return
+                }
+                if (
+                    !currentConfig.enabled ||
+                    !currentConfig.compaction.automatic ||
+                    compressPermission(state, currentConfig) !== "allow" ||
+                    (state.isSubAgent && !currentConfig.experimental.allowSubAgents)
+                )
+                    return
+                const usageMessageId = getCurrentUsageMessageId(state, messages)
+                if (!usageMessageId || usageMessageId === state.boundary.lastIdleUsageMessageId)
+                    return
+                const providerTokens = getCurrentTokenUsage(state, messages)
+                const params = getCurrentParams(state, messages, logger)
+                const resolved = resolveModelConfig(
+                    currentConfig,
+                    params.providerId,
+                    params.modelId,
+                )
+                const contextLimit =
+                    params.providerId && params.modelId
+                        ? await runtime.resolveModelLimit(params.providerId, params.modelId)
+                        : undefined
+                state.modelContextLimit = contextLimit
+                if (!contextLimit || !providerTokens) {
+                    await recordAutomaticCheck(
+                        state,
+                        logger,
+                        !contextLimit ? "model_limit_unknown" : "provider_usage_unavailable",
+                        messages,
+                        resolved,
+                        providerTokens,
+                        "idle",
+                    )
+                    return
+                }
+                const profile = resolveCompactionProfile(resolved)
+                const trigger =
+                    resolved.compaction.triggerTokens ??
+                    Math.floor((contextLimit * profile.triggerPercent) / 100)
+                state.boundary.lastIdleUsageMessageId = usageMessageId
+                if (providerTokens < trigger) {
+                    await recordAutomaticCheck(
+                        state,
+                        logger,
+                        "below_trigger",
+                        messages,
+                        resolved,
+                        providerTokens,
+                        "idle",
+                    )
+                    await saveSessionState(state, logger)
+                    return
+                }
+                await saveSessionState(state, logger)
+                const outcome = await runAutomaticTransform({
+                    client,
+                    runtime,
+                    state,
+                    logger,
+                    config: resolved,
+                    workingDirectory: directory,
+                    sessionId,
+                    messages,
+                    params,
+                })
+                await recordAutomaticCheck(
+                    state,
+                    logger,
+                    outcome,
+                    messages,
+                    resolved,
+                    openCodeCodec.estimateTurns(openCodeCodec.encode(messages)),
+                    "idle",
+                )
+            } catch (error) {
+                logger.warn("Better Compact could not run at idle", {
+                    sessionId,
+                    error: error instanceof Error ? error.name : "unknown",
+                })
+            }
+            return
+        }
         if (input.event.type === "session.compacted") {
             const sessionId = input.event.properties?.sessionID
             const state = typeof sessionId === "string" ? runtime.peek(sessionId) : undefined
@@ -999,7 +1996,7 @@ export function createEventHandler(runtime: RuntimeState, logger: Logger) {
             state.boundary.job = null
             await saveSessionState(state, logger).catch((error) => {
                 logger.warn("Failed to persist state reset after native compaction", {
-                    error: error instanceof Error ? error.message : String(error),
+                    error: safeCompactionFailure(error),
                 })
             })
             return
@@ -1008,6 +2005,85 @@ export function createEventHandler(runtime: RuntimeState, logger: Logger) {
         if (input.event.type === "session.deleted") {
             const sessionId = input.event.properties?.info?.id
             if (typeof sessionId === "string") runtime.evict(sessionId)
+        }
+
+        if (
+            input.event.type === "message.updated" &&
+            client &&
+            config &&
+            directory &&
+            hostPermissions
+        ) {
+            const sessionId =
+                input.event.properties?.sessionID ?? input.event.properties?.info?.sessionID
+            if (typeof sessionId !== "string" || runtime.isScratch(sessionId)) return
+            // OpenCode stamps time.completed at the end of EVERY assistant
+            // step, including tool-call steps followed by another provider
+            // request. Only a terminal finish can end the turn here; idle is
+            // the fallback for errors/cancellation and ambiguous finishes.
+            const info = input.event.properties?.info
+            if (!info || typeof info !== "object" || info.role !== "assistant") return
+            const completedAt = info.time?.completed
+            if (typeof completedAt !== "number" || !Number.isFinite(completedAt)) return
+            if (typeof info.finish !== "string" || ["tool-calls", "unknown"].includes(info.finish))
+                return
+            const queued = runtime.peek(sessionId)?.boundary.queuedManual
+            if (!queued) return
+            // The completed turn must postdate the request. When the request
+            // lands between steps, the just-finished message is already
+            // stale; the queue must wait for the NEXT assistant turn to end.
+            if (completedAt < queued.requestedAt) return
+            try {
+                const response = await client.session.messages({ path: { id: sessionId } })
+                const messages = filterMessages(response.data ?? response)
+                // Some providers report a terminal finish even with tool
+                // calls. The host will continue those turns; never compact a
+                // prefix which is still growing with their results.
+                const completed = messages.find((message) => message.info.id === info.id)
+                if (!completed || completed.info.role !== "assistant") return
+                if (
+                    completed.parts.some(
+                        (part) =>
+                            part.type === "tool" &&
+                            !(part as any).metadata?.providerExecuted &&
+                            !(
+                                part.state.status === "error" &&
+                                part.state.metadata?.interrupted === true
+                            ),
+                    )
+                )
+                    return
+                const state = await runtime.prepare(sessionId, messages)
+                if (!state.boundary.queuedManual) return
+                await expireArchives(directory, sessionId)
+                const currentConfig = loadConfig()
+                syncCompressPermissionState(state, currentConfig, hostPermissions, messages)
+                if (
+                    compressPermission(state, currentConfig) !== "allow" ||
+                    (state.isSubAgent && !currentConfig.experimental.allowSubAgents)
+                ) {
+                    state.boundary.queuedManual = undefined
+                    await saveSessionState(state, logger)
+                    return
+                }
+                await runQueuedManual({
+                    client,
+                    runtime,
+                    state,
+                    logger,
+                    config: currentConfig,
+                    directory,
+                    sessionId,
+                    messages,
+                    beforeRequest: false,
+                })
+            } catch (error) {
+                logger.warn("Better Compact could not run at assistant turn end", {
+                    sessionId,
+                    error: error instanceof Error ? error.name : "unknown",
+                })
+            }
+            return
         }
     }
 }
