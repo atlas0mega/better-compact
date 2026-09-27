@@ -52,13 +52,10 @@ pi install npm:@better-compact/pi
 
 ### OpenCode
 
-Requires OpenCode 1.17.13 or newer.
+Requires OpenCode V2 2.0.18 or newer. The OpenCode package no longer includes a V1 entrypoint.
 
-```bash
-opencode plugin better-compact --global
-```
-
-Restart OpenCode after installation.
+Add `"better-compact@0.3.0"` to the V2 `plugins` array in `opencode.jsonc`.
+See [the OpenCode V2 package guide](packages/opencode/README.md).
 
 ### Claude Code
 
@@ -92,13 +89,12 @@ better-compact claude --run
 | Platform          | Command                                         | Action                                |
 | ----------------- | ----------------------------------------------- | ------------------------------------- |
 | OMP               | `/better-compact`                               | Run the selected committed compaction |
-| pi, OpenCode      | `/better-compact`                               | Run Better Compact now                |
+| pi, OpenCode      | `/better-compact`                               | Request a checkpoint at the next safe point |
 | OMP               | `/better-compact-report`                        | Show the active plan                  |
-| OMP, pi, OpenCode | `/better-compact-settings`                      | Open settings                         |
+| OMP, pi           | `/better-compact-settings`                      | Open settings                         |
 | OMP, pi           | `/better-compact-preset <light\|moderate\|max>` | Change the pruning preset             |
 | OMP               | `/better-compact-mode <better-compact\|omp>`    | Choose the owner for new sessions     |
-| OpenCode          | `/better-compact context`                       | Show context usage                    |
-| OpenCode          | `/better-compact stats`                         | Show the active plan                  |
+| OpenCode          | `/better-compact-status`                        | Show archive and checkpoint status    |
 | Claude Code       | `/better-compact:compact`                       | Queue compaction for session exit     |
 
 ## Presets
@@ -209,7 +205,9 @@ platform codec
 outgoing context
 ```
 
-Native payloads stay attached to IR items as opaque handles. Unchanged content is returned without reconstruction. Tool calls and tool results are paired into one item, so pruning cannot leave an orphaned result.
+Native payloads stay attached to IR items as opaque handles. The OpenCode V2
+adapter validates call/result pairing and opaque provider state before a
+transformed request can be emitted.
 
 ### Pruning order
 

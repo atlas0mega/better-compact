@@ -4,7 +4,7 @@ Design for extending the context-pruning ladder from OpenCode to pi, Claude Code
 
 Two integration modes ship today:
 
-- **In-process transform** (OpenCode `experimental.chat.messages.transform`, pi `context` event): we receive the platform's native message array and return a replacement.
+- **In-process transform** (OpenCode V2 `ctx.session.hook("context")`, pi `context` event): we receive the platform's native message array and return a replacement.
 - **On-disk transcript compaction** (Claude Code, `better-compact claude`): we rewrite the closed session's transcript file, which the platform re-derives its context from on resume.
 
 Everything below follows from making the ladder run once, identically, over these modes.

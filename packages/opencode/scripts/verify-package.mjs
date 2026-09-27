@@ -13,13 +13,16 @@ const builtinNames = new Set([
     ...builtinModules.map((name) => name.replace(/^node:/, "")),
 ])
 
-const allowedNamedImportPackages = new Set(["@opentui/core", "@opentui/solid", "solid-js"])
+const allowedNamedImportPackages = new Set(["jsonc-parser"])
 
 const requiredRepoFiles = [
+    "index.js",
     "dist/index.js",
     "dist/tui.js",
     "dist/index.d.ts",
     "dist/tui.d.ts",
+    "dist/rpc.js",
+    "dist/rpc.d.ts",
     "better-compact.schema.json",
     "README.md",
     "LICENSE",
@@ -27,10 +30,13 @@ const requiredRepoFiles = [
 
 const requiredTarballFiles = [
     "package.json",
+    "index.js",
     "dist/index.js",
     "dist/tui.js",
     "dist/index.d.ts",
     "dist/tui.d.ts",
+    "dist/rpc.js",
+    "dist/rpc.d.ts",
     "better-compact.schema.json",
     "README.md",
     "LICENSE",
@@ -69,7 +75,7 @@ function assertRepoFilesExist() {
 
 function assertNoUnpublishedChunks() {
     const chunks = readdirSync(path.join(root, "dist")).filter(
-        (name) => name.endsWith(".js") && name !== "index.js" && name !== "tui.js",
+        (name) => name.endsWith(".js") && !["index.js", "tui.js", "rpc.js"].includes(name),
     )
     if (chunks.length) fail(`build emitted JS chunks not included in the published tarball: ${chunks.join(", ")}`)
 }
@@ -85,24 +91,29 @@ function assertPackageJsonShape() {
         fail("expected package.json exports['.'].import to be './dist/index.js'")
     }
 
-    if (pkg.exports?.["./server"]?.import !== "./dist/index.js") {
-        fail("expected package.json exports['./server'].import to be './dist/index.js'")
-    }
-
     if (pkg.exports?.["./tui"]?.import !== "./dist/tui.js") {
         fail("expected package.json exports['./tui'].import to be './dist/tui.js'")
     }
-
-    if (pkg.engines?.opencode !== ">=1.17.13 <2") {
-        fail("package.json engines.opencode must be '>=1.17.13 <2'")
+    if (pkg.exports?.["./rpc"]?.import !== "./dist/rpc.js") {
+        fail("expected package.json exports['./rpc'].import to be './dist/rpc.js'")
+    }
+    if (pkg.exports?.["./server"] || pkg.dependencies?.["@opencode-ai/plugin"] ||
+        pkg.devDependencies?.["@opencode-ai/sdk"]) {
+        fail("V1 package surface remains")
+    }
+    if (pkg.engines?.opencode !== ">=2.0.18 <3") {
+        fail("package.json engines.opencode must be '>=2.0.18 <3'")
     }
 
     const files = Array.isArray(pkg.files) ? pkg.files : []
     for (const entry of [
+        "index.js",
         "dist/index.js",
         "dist/index.d.ts",
         "dist/tui.js",
         "dist/tui.d.ts",
+        "dist/rpc.js",
+        "dist/rpc.d.ts",
         "better-compact.schema.json",
         "README.md",
         "LICENSE",
@@ -119,7 +130,7 @@ function assertPackageJsonShape() {
 
 function getPublishedBareImports() {
     const specifiers = new Set()
-    for (const entry of ["dist/index.js", "dist/tui.js"]) {
+    for (const entry of ["dist/index.js", "dist/tui.js", "dist/rpc.js"]) {
         const source = readFileSync(path.join(root, entry), "utf8")
         for (const [, specifier] of source.matchAll(/\bfrom\s*["']([^"']+)["']/g)) {
             if (specifier.startsWith(".") || specifier.startsWith("/")) continue
@@ -130,28 +141,21 @@ function getPublishedBareImports() {
     return specifiers
 }
 
-// OpenCode resolves @opentui/* to its own embedded copies through a Bun resolver
-// plugin, so a plugin never loads them from its own node_modules. An upper bound
-// there protects nothing and only makes `opencode plugin better-compact`
-// unresolvable the moment OpenTUI ships a minor, which is what 0.5.0 did.
 function assertInstallableDependencies() {
     const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"))
     const peers = pkg.peerDependencies ?? {}
+    const dependencies = pkg.dependencies ?? {}
     const meta = pkg.peerDependenciesMeta ?? {}
-
-    if (Object.keys(pkg.dependencies ?? {}).length > 0) {
-        fail(
-            "package.json must not declare dependencies; tsup bundles them through noExternal, so anything listed here is installed but never loaded",
-        )
-    }
+    if (dependencies["@opencode/plugin"] !== "2.0.18" || dependencies["@opencode/ai"] !== "2.0.18")
+        fail("V2 runtime dependencies must be explicitly installable at the tested versions")
 
     const imported = getPublishedBareImports()
     if (imported.size === 0) {
         fail("found no bare imports in the built bundles; the import scan is no longer working")
     }
     for (const specifier of imported) {
-        if (!(specifier in peers)) {
-            fail(`dist imports ${specifier}, so package.json must declare it as a peer dependency`)
+        if (!(specifier in peers) && !(specifier in dependencies)) {
+            fail(`dist imports ${specifier}, so package.json must declare a runtime dependency`)
         }
     }
 
@@ -167,26 +171,31 @@ function assertInstallableDependencies() {
 
 async function validateBuiltEntrypoints() {
     const server = await import(pathToFileURL(path.join(root, "dist/index.js")).href)
-    if (typeof server.default !== "function") {
-        fail("dist/index.js must default export the server plugin function")
+    if (server.default?.id !== "better-compact" || typeof server.default.setup !== "function" || "server" in server.default) {
+        fail("dist/index.js must default export a V2-only plugin definition")
     }
 
     const tui = await import(pathToFileURL(path.join(root, "dist/tui.js")).href)
     if (
         !tui.default ||
-        tui.default.id !== "better-compact" ||
-        typeof tui.default.tui !== "function"
+        tui.default.id !== "better-compact.tui" ||
+        typeof tui.default.setup !== "function" || "tui" in tui.default
     ) {
-        fail("dist/tui.js must default export the Better Compact TUI plugin")
+        fail("dist/tui.js must default export a V2-only TUI plugin")
     }
+    const rpc = await import(pathToFileURL(path.join(root, "dist/rpc.js")).href)
+    if (rpc.BetterCompactRPC?.id !== "better-compact") fail("dist/rpc.js must export the V2 RPC contract")
 }
 
 function getImportStatements(source) {
     const pattern = /^\s*import\s+([^\n;]+?)\s+from\s+["']([^"']+)["']/gm
-    return Array.from(source.matchAll(pattern), (match) => ({
+    const imported = Array.from(source.matchAll(pattern), (match) => ({
         clause: match[1].trim(),
         specifier: match[2],
     }))
+    const exports = Array.from(source.matchAll(/^\s*export\s+([^\n;]+?)\s+from\s+["']([^"']+)["']/gm),
+        (match) => ({ clause: match[1].trim(), specifier: match[2] }))
+    return [...imported, ...exports]
 }
 
 function getImportKind(clause) {
@@ -269,7 +278,7 @@ function packageLooksCommonJs(pkg) {
 }
 
 function validateRuntimeImportGraph() {
-    const pending = [path.join(root, "index.ts"), path.join(root, "tui.tsx")]
+    const pending = [path.join(root, "index.ts"), path.join(root, "tui.ts"), path.join(root, "rpc.ts")]
     const seen = new Set()
 
     while (pending.length > 0) {
@@ -302,6 +311,23 @@ function validateRuntimeImportGraph() {
                 )
             }
         }
+    }
+}
+
+function assertNoV1Source() {
+    const paths = ["index.ts", "tui.ts", "rpc.ts", "index.js"]
+    const walk = (directory) => {
+        for (const entry of readdirSync(path.join(root, directory), { withFileTypes: true })) {
+            const relative = path.join(directory, entry.name)
+            if (entry.isDirectory()) walk(relative)
+            else if (/\.(?:ts|tsx|js)$/.test(entry.name)) paths.push(relative)
+        }
+    }
+    walk("lib")
+    for (const relative of paths) {
+        const source = readFileSync(path.join(root, relative), "utf8")
+        if (/@opencode-ai\/(?:plugin|sdk)|experimental\.chat\.|\bPluginInput\b|\.client\.tui\./.test(source))
+            fail(`V1 plugin implementation remains in ${relative}`)
     }
 }
 
@@ -346,5 +372,6 @@ assertNoUnpublishedChunks()
 assertPackageJsonShape()
 assertInstallableDependencies()
 validateRuntimeImportGraph()
+assertNoV1Source()
 await validateBuiltEntrypoints()
 validatePackedFiles()

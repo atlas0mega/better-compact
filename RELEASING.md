@@ -6,10 +6,12 @@ Four packages publish to npm through package-specific tags. OpenCode, CLI, and c
 
 ## `better-compact` (the OpenCode plugin)
 
-1. Bump `packages/opencode/package.json` `version`, commit, push to `main`.
-2. Tag and push:
+1. Review and merge the V2-only `OPENCODE` pull request into `main` after the
+   installed package, real continuation-quality and TUI gates pass. The human
+   release owner handles tags; agent work does not push directly to `main`.
+2. Tag and push the version from `packages/opencode/package.json`:
     ```bash
-    git tag v0.2.1 && git push origin v0.2.1
+    git tag v0.3.0 && git push origin v0.3.0
     ```
     `.github/workflows/release.yml` verifies the tag matches the version, runs
     the full gate, smoke-installs the tarball through a real `opencode`, and

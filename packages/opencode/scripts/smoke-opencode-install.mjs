@@ -1,174 +1,108 @@
-import { execFileSync } from "node:child_process"
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
-import { register } from "node:module"
+import { execFileSync, spawn } from "node:child_process"
+import { createServer } from "node:net"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import process from "node:process"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const args = process.argv.slice(2).filter((value) => value !== "--")
-const executableArg = args[0] ?? process.env.OPENCODE_BIN
-const executable = path.resolve(executableArg ?? "")
-const packageSpec = args[1]
-
-if (!executableArg) {
-    throw new Error("pass the OpenCode executable path as the first argument or OPENCODE_BIN")
-}
-
-// OpenCode resolves the optional peers to its own embedded copies, so an installed
-// plugin never ships them. Resolve them from this repo to match, otherwise this
-// check would silently depend on the plugin installing packages it never loads.
-const hostProvided = Object.entries(
-    JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).peerDependenciesMeta ?? {},
-)
-    .filter(([, meta]) => meta?.optional)
-    .map(([name]) => name)
-
-register(
-    "data:text/javascript," +
-        encodeURIComponent(`
-            const provided = ${JSON.stringify(hostProvided)}
-            const parentURL = ${JSON.stringify(pathToFileURL(path.join(root, "package.json")).href)}
-            export function resolve(specifier, context, next) {
-                const host = provided.some(
-                    (name) => specifier === name || specifier.startsWith(name + "/"),
-                )
-                return next(specifier, host ? { ...context, parentURL } : context)
-            }
-        `),
-)
-
-const sandbox = await mkdtemp(path.join(tmpdir(), "better-compact-install-"))
-
-async function findInstalledPackage(rootDir) {
-    const pending = [rootDir]
-    while (pending.length > 0) {
-        const dir = pending.shift()
-        if (!dir) continue
-
-        try {
-            const pkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"))
-            if (pkg.name === "better-compact") return dir
-        } catch {}
-
-        const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
-        for (const entry of entries) {
-            if (entry.isDirectory()) pending.push(path.join(dir, entry.name))
-        }
-    }
-}
+const executable = process.env.OPENCODE_BIN ?? "opencode"
+const packageSpec = process.env.BETTER_COMPACT_SMOKE_SPEC
+const sandbox = await mkdtemp(path.join(tmpdir(), "better-compact-v2-install-"))
+let server
+let diagnostics = ""
 
 try {
-    const packageDir = path.join(sandbox, "package")
-    const projectDir = path.join(sandbox, "project")
+    let target = packageSpec
+    if (!target) {
+        const metadata = JSON.parse(execFileSync("npm", ["pack", "--pack-destination", sandbox, "--json"], {
+            cwd: root, encoding: "utf8",
+        }))
+        const packageInfo = Array.isArray(metadata) ? metadata[0] : Object.values(metadata)[0]
+        if (!packageInfo?.filename) throw new Error("npm pack did not produce a package")
+        target = path.join(sandbox, packageInfo.filename)
+    }
+    // The OpenCode TUI supplies these optional host peers at runtime. Install
+    // them in the isolated Node smoke to import the packed TUI entry directly.
+    execFileSync("npm", ["install", "--prefix", sandbox, "--no-save", "--ignore-scripts", "--no-audit", "--no-fund",
+        target, "solid-js@1.9.12", "@opentui/core@0.5.12", "@opentui/solid@0.5.12",
+        "@opencode/theme@2.0.18"], { cwd: sandbox, encoding: "utf8", timeout: 90_000 })
+    const installed = path.join(sandbox, "node_modules", "better-compact")
+    const packagedTui = await import(pathToFileURL(path.join(installed, "dist", "tui.js")).href)
+    const packagedRPC = await import(pathToFileURL(path.join(installed, "dist", "rpc.js")).href)
+    if (packagedTui.default?.id !== "better-compact.tui" || typeof packagedTui.default.setup !== "function" ||
+        packagedRPC.BetterCompactRPC?.id !== "better-compact")
+        throw new Error("Installed package TUI or RPC export is not V2-ready")
     const configHome = path.join(sandbox, "config")
     const configDir = path.join(configHome, "opencode")
-
-    await mkdir(projectDir, { recursive: true })
-    await mkdir(configDir, { recursive: true })
-    if (!packageSpec) {
-        await mkdir(packageDir, { recursive: true })
-        await cp(path.join(root, "package.json"), path.join(packageDir, "package.json"))
-        await cp(path.join(root, "dist"), path.join(packageDir, "dist"), { recursive: true })
-    }
-
-    const marker = "// better-compact smoke-test comment"
-    await writeFile(
-        path.join(configDir, "opencode.jsonc"),
-        `{
+    const projectDir = path.join(sandbox, "project")
+    await Promise.all([mkdir(configDir, { recursive: true }), mkdir(projectDir), mkdir(path.join(sandbox, "home"))])
+    await mkdir(path.join(projectDir, ".opencode"))
+    await writeFile(path.join(projectDir, "opencode.jsonc"), `{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [${JSON.stringify(installed)}]
+}\n`)
+    const marker = "// preserve this V2 JSONC comment"
+    await writeFile(path.join(configDir, "opencode.jsonc"), `{
   ${marker}
   "$schema": "https://opencode.ai/config.json",
-}
-`,
-    )
-    await writeFile(
-        path.join(configDir, "tui.jsonc"),
-        `{
-  ${marker}
-  "$schema": "https://opencode.ai/tui.json",
-}
-`,
-    )
-
-    const env = {
-        ...process.env,
-        HOME: path.join(sandbox, "home"),
-        XDG_CACHE_HOME: path.join(sandbox, "cache"),
-        XDG_CONFIG_HOME: configHome,
-        XDG_DATA_HOME: path.join(sandbox, "data"),
-        XDG_STATE_HOME: path.join(sandbox, "state"),
-        PATH: path.dirname(executable),
+  "compaction": { "auto": false }
+}\n`)
+    const env = { ...process.env,
+        HOME: path.join(sandbox, "home"), XDG_CONFIG_HOME: configHome,
+        XDG_DATA_HOME: path.join(sandbox, "data"), XDG_CACHE_HOME: path.join(sandbox, "cache"),
+        XDG_STATE_HOME: path.join(sandbox, "state"), OPENCODE_DB: path.join(sandbox, "staging.db"),
+        OPENCODE_PASSWORD: "better-compact-staging-only",
     }
-
-    const version = execFileSync(executable, ["--version"], { encoding: "utf8", env }).trim()
-    const target = packageSpec ?? packageDir
-    execFileSync(executable, ["plugin", target, "--global"], {
-        cwd: projectDir,
-        env,
-        encoding: "utf8",
-        stdio: "pipe",
+    const port = await new Promise((resolve, reject) => {
+        const listener = createServer()
+        listener.once("error", reject)
+        listener.listen(0, "127.0.0.1", () => {
+            const number = listener.address().port
+            listener.close(() => resolve(number))
+        })
     })
-
-    for (const name of ["opencode.jsonc", "tui.jsonc"]) {
-        const text = await readFile(path.join(configDir, name), "utf8")
-        if (!text.includes(marker)) {
-            throw new Error(`${name} lost its existing JSONC comment`)
-        }
-        if (!text.includes(target)) {
-            throw new Error(`${name} does not register ${target}`)
-        }
-    }
-
-    const debug = execFileSync(executable, ["debug", "config"], {
-        cwd: projectDir,
-        env,
-        encoding: "utf8",
-        stdio: "pipe",
+    server = spawn(executable, ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--log-level", "debug", "--print-logs"],
+        { cwd: projectDir, env, stdio: ["ignore", "pipe", "pipe"] })
+    server.stderr.on("data", (chunk) => { diagnostics = (diagnostics + String(chunk)).slice(-12_000) })
+    await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("V2 server startup timed out")), 30_000)
+        server.once("error", reject)
+        server.once("exit", (code) => reject(new Error(`V2 server exited before startup: ${code}`)))
+        server.stdout.on("data", (chunk) => {
+            if (!String(chunk).includes("server listening")) return
+            clearTimeout(timeout)
+            resolve()
+        })
     })
-    const config = JSON.parse(debug)
-    if (config.compaction?.auto !== false) {
-        throw new Error("server plugin did not initialize and disable native auto-compaction")
+    const address = `http://127.0.0.1:${port}`
+    execFileSync(executable, ["api", "--server", address, "post", "/api/session", "--data",
+        '{"title":"Better Compact packaged smoke"}'], { cwd: projectDir, env, encoding: "utf8", timeout: 30_000 })
+    const configDocs = execFileSync(executable, ["api", "--server", address, "get", "/api/config"],
+        { cwd: projectDir, env, encoding: "utf8", timeout: 30_000 })
+    let listing
+    let plugin
+    for (let attempt = 0; attempt < 12; attempt++) {
+        listing = JSON.parse(execFileSync(executable, ["api", "--server", address, "get", "/api/plugin",
+            "--param", `location.directory=${projectDir}`], { cwd: projectDir, env, encoding: "utf8", timeout: 60_000 }))
+        plugin = listing.data?.find((item) => item.id === "better-compact")
+        if (plugin?.state?.status === "active" || plugin?.state?.status === "error") break
+        await new Promise((resolve) => setTimeout(resolve, 250))
     }
-
-    Object.assign(process.env, {
-        XDG_CACHE_HOME: env.XDG_CACHE_HOME,
-        XDG_CONFIG_HOME: env.XDG_CONFIG_HOME,
-        XDG_DATA_HOME: env.XDG_DATA_HOME,
-        XDG_STATE_HOME: env.XDG_STATE_HOME,
-    })
-    const layers = []
-    const installedPackage = packageSpec
-        ? await findInstalledPackage(env.XDG_CACHE_HOME)
-        : undefined
-    if (packageSpec && !installedPackage) {
-        throw new Error(`OpenCode cache does not contain ${packageSpec}`)
+    if (plugin?.state?.status !== "active" || plugin.source?.type !== "local") {
+        const serverLog = await readFile(path.join(sandbox, "data", "opencode", "log", "opencode.log"), "utf8").catch(() => "")
+        const relevant = serverLog.split("\n").filter((line) => /plugin|error|warn/i.test(line)).slice(-30).join("\n")
+        throw new Error(`Packed V2 plugin not active: ${plugin?.state?.status ?? "absent"}\nConfig: ${configDocs}\n${diagnostics}\n${relevant}`)
     }
-    const tuiPath = path.join(installedPackage ?? root, "dist/tui.js")
-    const tui = await import(`${pathToFileURL(tuiPath).href}?smoke=${Date.now()}`)
-    await tui.default.tui({
-        client: {},
-        state: {
-            path: { directory: projectDir, worktree: projectDir },
-        },
-        keymap: {
-            registerLayer(layer) {
-                layers.push(layer)
-            },
-        },
-    })
-    const commands = layers
-        .flatMap((layer) => layer.commands ?? [])
-        .map((command) => command.slashName)
-    for (const command of ["better-compact", "better-compact-settings"]) {
-        if (!commands.includes(command)) {
-            throw new Error(`TUI plugin did not register /${command}`)
-        }
-    }
-
-    console.log(
-        `OpenCode ${version} installed ${target}, loaded its server plugin without an external runtime, and registered its TUI commands`,
-    )
+    if (!(await readFile(path.join(configDir, "opencode.jsonc"), "utf8")).includes(marker))
+        throw new Error("V2 config lost its JSONC comment")
+    const installedManifest = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"))
+    console.log(`Installed better-compact V2 ${installedManifest.version} loaded as an active server plugin from ${plugin.source.path}`)
 } finally {
+    if (server && server.exitCode === null && server.signalCode === null) {
+        const stopped = new Promise((resolve) => server.once("exit", resolve))
+        server.kill()
+        await stopped
+    }
     await rm(sandbox, { recursive: true, force: true })
 }
