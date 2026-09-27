@@ -4,7 +4,7 @@ import { loadV2Config } from "./config"
 import { expireV2Archives } from "./archive"
 import { registerV2Recall } from "./recall"
 import { registerV2RPC } from "./rpc"
-import { compactV2Native } from "./native"
+import { compactV2Native, hasOpaqueProviderState } from "./native"
 import type { PluginConfig } from "./config"
 
 function safeFailureCode(error: unknown): string {
@@ -105,6 +105,11 @@ export default Plugin.define({
             const config = await loadV2Config(session.location.directory, event.model)
             if (!config.enabled || session.parentID && !config.experimental.allowSubAgents) return
             if (config.compress.permission !== "allow") throw new Error("Better Compact V2 compaction is not allowed by plugin settings")
+            if (hasOpaqueProviderState(event.messages)) return
+            // Native compaction may be configured on the provider rather than
+            // the model. Model listings do not include provider-level settings.
+            const provider = await ctx.provider.get({ providerID: event.model.providerID }).catch(() => undefined)
+            if (!provider || provider.data.settings?.compaction?.type === "native") return
             const model = (await ctx.model.list()).data.find((candidate) =>
                 candidate.providerID === event.model.providerID && candidate.id === event.model.id)
             // Keep the host's native encrypted provider checkpoint path intact.

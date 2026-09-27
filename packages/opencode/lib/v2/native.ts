@@ -5,6 +5,12 @@ import { v2Codec } from "./codec"
 import { summarizeV2Boundary } from "./handoff"
 import { identifyV2Messages } from "./identity"
 
+/** Opaque checkpoints need the host/provider compaction path, not a text handoff. */
+export function hasOpaqueProviderState(messages: readonly Message[]): boolean {
+    return messages.some((message) => message.content.some((part) => part.type === "compaction" ||
+        part.type === "reasoning" && !!part.encrypted))
+}
+
 /** Native V2 manual-compaction hook: accept only a complete, exact-user-preserving handoff. */
 export async function compactV2Native(input: {
     root: string
@@ -17,8 +23,7 @@ export async function compactV2Native(input: {
     const { messages: original, originals } = identifyV2Messages(input.messages)
     if (original.some((message) => message.role === "system"))
         throw new Error("Cannot safely compact V2 system updates")
-    if (original.some((message) => message.content.some((part) => part.type === "compaction" ||
-        part.type === "reasoning" && !!part.encrypted)))
+    if (hasOpaqueProviderState(original))
         throw new Error("Opaque provider state requires native provider compaction")
     const originalTokens = v2Codec.estimateTurns(v2Codec.encode(original))
     const catalogBefore = await loadV2Catalog(input.root, input.sessionID)
