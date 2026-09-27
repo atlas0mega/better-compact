@@ -5,7 +5,7 @@ export default Plugin.define({
     id: "better-compact.tui",
     setup(ctx) {
         const rpc = ctx.client.rpc(BetterCompactRPC)
-        ctx.keymap.layer(() => ({
+        const layer: Parameters<typeof ctx.keymap.layer>[0] = () => ({
             mode: "global",
             commands: [{
                 id: "better-compact.run",
@@ -58,6 +58,12 @@ export default Plugin.define({
                     }
                 },
             }],
-        }))
+        })
+        // The keymap provider exists only while an app-slot component renders.
+        // Registering a layer directly in plugin setup throws in the real TUI.
+        return ctx.ui.slot({ append: "app", render: () => {
+            ctx.keymap.layer(layer)
+            return null
+        } })
     },
 })

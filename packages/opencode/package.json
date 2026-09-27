@@ -27,6 +27,7 @@
         "verify:release": "node scripts/verify-release.mjs",
         "smoke:install": "node scripts/smoke-opencode-install.mjs",
         "smoke:host": "node scripts/smoke-v2-host.mjs",
+        "smoke:tui": "node scripts/smoke-v2-tui.mjs",
         "check:package": "pnpm run build && pnpm run verify:package",
         "prepublishOnly": "pnpm run check:package",
         "dev": "opencode plugin dev",

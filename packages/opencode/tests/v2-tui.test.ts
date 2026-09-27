@@ -4,6 +4,8 @@ import tui from "../lib/v2/tui"
 
 test("V2 TUI registers only native CLI commands and routes manual compaction through the V2 client", async () => {
     let layer: any
+    let render: (() => unknown) | undefined
+    let disposed = false
     const queued: string[] = []
     const notices: string[] = []
     const ctx = {
@@ -15,11 +17,18 @@ test("V2 TUI registers only native CLI commands and routes manual compaction thr
         },
         keymap: { layer: (create: () => unknown) => { layer = create() } },
         ui: {
+            slot: (input: { append: string; render: () => unknown }) => {
+                assert.equal(input.append, "app")
+                render = input.render
+                return () => { disposed = true }
+            },
             router: { current: () => ({ type: "session", sessionID: "ses_test" }) },
             toast: { show: (input: { message: string }) => { notices.push(input.message) } },
         },
     }
-    await tui.setup(ctx as never)
+    const cleanup = await tui.setup(ctx as never)
+    assert.equal(layer, undefined, "keymap must not mount before the app provider renders")
+    render?.()
     assert.equal(tui.id, "better-compact.tui")
     assert.deepEqual(layer.commands.map((item: any) => item.slash.name), ["better-compact", "better-compact-status"])
     await layer.commands[0].run()
@@ -27,4 +36,6 @@ test("V2 TUI registers only native CLI commands and routes manual compaction thr
     assert.deepEqual(queued, ["ses_test"])
     assert.match(notices[0], /next safe point/)
     assert.match(notices[1], /2 exact archives/)
+    if (typeof cleanup === "function") cleanup()
+    assert.equal(disposed, true)
 })

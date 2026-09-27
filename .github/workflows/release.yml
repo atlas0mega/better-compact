@@ -35,6 +35,7 @@ jobs:
             - run: pnpm run verify:package
             - run: curl -fsSL https://opencode.ai/install | bash -s -- --version 2.0.18 --no-modify-path
             - run: OPENCODE_BIN="$HOME/.opencode/bin/opencode" pnpm --filter better-compact run smoke:host
+            - run: OPENCODE_BIN="$HOME/.opencode/bin/opencode" pnpm --filter better-compact run smoke:tui
             # pnpm pack rewrites the workspace: protocol to a real version; npm pack
             # would publish "@better-compact/core": "workspace:*" verbatim.
             - run: |
