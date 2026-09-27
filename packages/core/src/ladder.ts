@@ -1734,6 +1734,9 @@ function synthesizeReferenceTurn(
                           ]
                         : [
                               "Exact older details are available through better_compact_recall when needed; use it sparingly.",
+                              ...(ctx.archiveCatalogText === ""
+                                  ? ["", "## Reference Files", `- "${ctx.transcriptRelativePath}"`]
+                                  : []),
                               ...(ctx.archiveCatalogText
                                   ? ["", "## Ready archives", ctx.archiveCatalogText]
                                   : []),

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { mkdtemp, readFile } from "node:fs/promises"
+import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Message } from "@opencode/ai"
 import type { PluginConfig } from "../lib/v2/config"
-import { loadV2Catalog, readV2Archive } from "../lib/v2/archive"
+import { appendV2Archive, loadV2Catalog, readV2Archive } from "../lib/v2/archive"
 import { v2Codec } from "../lib/v2/codec"
 import { compactV2Context, lastProviderTokens } from "../lib/v2/context"
 
@@ -44,6 +44,8 @@ test("V2 request seam archives originals, shrinks old tools, and keeps current i
     assert.equal(JSON.stringify(recovered), JSON.stringify(original.filter((message) => catalog.entries[0]!.messageIDs.includes(message.id!))))
     const pointer = event.messages.flatMap((message) => message.content)
         .filter((part) => part.type === "text").map((part) => part.text).join("\n")
+    assert.match(pointer, /better_compact_recall/)
+    assert.doesNotMatch(pointer, /## Compacted Assistant Runs/, "do not duplicate the whole run index in every provider request")
     const path = pointer.match(/\.opencode\/better-compact\/v2\/sessions\/ses_fixture\/catalog\.json/)?.[0]
     assert.ok(path, "the model-visible reference must point to a real private catalog")
     assert.ok((await readFile(join(root, path), "utf8")).includes(catalog.entries[0]!.id))
@@ -85,6 +87,258 @@ test("V2 request seam compacts real ID-less tool messages without losing exact h
     assert.equal((await compactV2Context(replay, input)).status, "applied")
     assert.equal(JSON.stringify(replay.messages), JSON.stringify(event.messages))
     assert.equal((await loadV2Catalog(root, event.sessionID)).entries.length, catalog.entries.length)
+})
+
+test("a stable replay never prunes or rearchives newly appended assistant, tool, or human messages", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-replay-tail-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const older = [Message.user("Keep the exact existing constraints"),
+        ...Array.from({ length: 10 }, (_, index) => [
+            Message.make({ role: "assistant", content: [{ type: "tool-call", id: `old-${index}`, name: "read", input: { path: `old-${index}` } }] }),
+            Message.make({ role: "tool", content: [{ type: "tool-result", id: `old-${index}`, name: "read",
+                result: { type: "text", value: `old-${index} ` + "older result ".repeat(220) } }] }),
+        ]).flat(), Message.user("Continue the current test")]
+    const before = v2Codec.estimateTurns(v2Codec.encode(older))
+    const local = { ...config, compaction: { ...config.compaction, custom: { ...config.compaction.custom,
+        recentToolTokens: 0, prefixSummary: false } } }
+    const input = { config: local, projectRoot: root, contextLimit: before + 100 }
+    const first = { sessionID: "ses_replay_tail", messages: [...older] }
+    assert.equal((await compactV2Context(first, input)).status, "applied")
+    const firstCatalog = await loadV2Catalog(root, first.sessionID)
+    assert.equal(firstCatalog.entries.length, 1)
+    assert.ok(firstCatalog.replayFrontier?.prefixSha256)
+    const newlyAdded = [
+        Message.assistant("New implementation decision after the first replay"),
+        Message.make({ role: "assistant", content: [{ type: "tool-call", id: "new-call", name: "read", input: { path: "active.ts" } }] }),
+        Message.make({ role: "tool", content: [{ type: "tool-result", id: "new-call", name: "read",
+            result: { type: "text", value: "large NEW tool result ".repeat(7_000) } }] }),
+        Message.assistant("The latest failure is still being investigated."),
+        Message.user("New user correction: do not change the active test."),
+    ]
+    const appended = { sessionID: first.sessionID, messages: [...older, ...newlyAdded] }
+    const result = await compactV2Context(appended, input)
+    assert.equal(result.status, "applied")
+    assert.deepEqual(appended.messages.slice(-newlyAdded.length), newlyAdded)
+    newlyAdded.forEach((message, index) => assert.equal(appended.messages.at(-newlyAdded.length + index), message))
+    const replay = { sessionID: first.sessionID, messages: [...older, ...newlyAdded] }
+    assert.equal((await compactV2Context(replay, input)).status, "applied")
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(appended.messages), "the same source pays no replay tax")
+    assert.equal((await loadV2Catalog(root, first.sessionID)).entries.length, 1, "the appended cohort is not an archive delta")
+    const moreWork = Message.assistant("The newest assistant message since replay stays literal too")
+    const later = { sessionID: first.sessionID, messages: [...older, ...newlyAdded, moreWork] }
+    assert.equal((await compactV2Context(later, input)).status, "applied")
+    assert.equal(later.messages.at(-1), moreWork)
+    assert.equal((await loadV2Catalog(root, first.sessionID)).entries.length, 1)
+})
+
+test("an earlier in-place edit cannot replay a historical prefix under the same last ID", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-revised-prefix-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const old = [Message.make({ id: "u1", role: "user", content: [Message.text("Keep old constraint")], }),
+        ...Array.from({ length: 12 }, (_, index) => [
+            Message.make({ id: `call-${index}`, role: "assistant", content: [{ type: "tool-call", id: `tool-${index}`, name: "read", input: {} }] }),
+            Message.make({ id: `result-${index}`, role: "tool", content: [{ type: "tool-result", id: `tool-${index}`, name: "read",
+                result: { type: "text", value: `The previous result ${index}. ${"Old log ".repeat(280)}` } }] }),
+        ]).flat(),
+        Message.make({ id: "u2", role: "user", content: [Message.text("Continue tests")] })]
+    const local = { ...config, compaction: { ...config.compaction, custom: { ...config.compaction.custom,
+        recentToolTokens: 0, prefixSummary: false } } }
+    const input = { config: local, projectRoot: root, contextLimit: v2Codec.estimateTurns(v2Codec.encode(old)) + 100 }
+    const first = { sessionID: "ses_revised", messages: [...old] }
+    assert.equal((await compactV2Context(first, input)).status, "applied")
+    const edited = [...old]
+    edited[2] = Message.make({ id: "result-0", role: "tool", content: [{ type: "tool-result", id: "tool-0", name: "read",
+        result: { type: "text", value: "A revised previous result, not the archived one" } }] })
+    const replay = { sessionID: first.sessionID, messages: edited }
+    const result = await compactV2Context(replay, input)
+    assert.equal(result.status, "declined")
+    assert.equal(result.reason, "replay-frontier-missing")
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(edited))
+    assert.equal((await loadV2Catalog(root, first.sessionID)).entries.length, 1)
+})
+
+test("older catalogs without a recorded frontier conservatively protect all later work", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-legacy-boundary-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const original = [Message.make({ id: "instruction", role: "user", content: [Message.text("Keep this instruction")] }),
+        ...Array.from({ length: 14 }, (_, index) => [
+            Message.make({ id: `old-call-${index}`, role: "assistant",
+                content: [{ type: "tool-call", id: `old-${index}`, name: "read", input: {} }] }),
+            Message.make({ id: `old-result-${index}`, role: "tool",
+                content: [{ type: "tool-result", id: `old-${index}`, name: "read",
+                    result: { type: "text", value: "Archived or new tool output ".repeat(300) } }] }),
+        ]).flat(), Message.make({ id: "latest", role: "user", content: [Message.text("Continue safely")] })]
+    const sessionID = "ses_prior_catalog"
+    await appendV2Archive(root, sessionID, original.slice(0, 11))
+    const file = join(root, ".opencode", "better-compact", "v2", "sessions", sessionID, "catalog.json")
+    const catalog = await loadV2Catalog(root, sessionID)
+    delete catalog.replayState
+    await writeFile(file, JSON.stringify(catalog), { mode: 0o600 })
+    const local = { ...config, compaction: { ...config.compaction, custom: { ...config.compaction.custom,
+        recentToolTokens: 0, prefixSummary: false } } }
+    const input = { config: local, projectRoot: root, contextLimit: v2Codec.estimateTurns(v2Codec.encode(original)) + 100 }
+    const first = { sessionID, messages: [...original] }
+    assert.equal((await compactV2Context(first, input)).status, "applied")
+    assert.deepEqual(first.messages.slice(-original.length + 11), original.slice(11),
+        "all messages newer than the old archive must remain literal")
+    const replay = { sessionID, messages: [...original] }
+    assert.equal((await compactV2Context(replay, input)).status, "applied")
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(first.messages))
+    assert.equal((await loadV2Catalog(root, sessionID)).entries.length, 1)
+})
+
+test("a chronological system update stays exact while later tools prune and the replay tail stays raw", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-system-barrier-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const earlier = Message.user("An earlier human request remains literal")
+    const authority = Message.make({ role: "system", content: [Message.text("Operator update: do not replace the current instructions")] })
+    const old = [earlier, authority, Message.user("Preserve this new user constraint"),
+        ...Array.from({ length: 12 }, (_, index) => [
+            Message.make({ role: "assistant", content: [{ type: "tool-call", id: `sys-call-${index}`, name: "read", input: { path: `src/${index}` } }] }),
+            Message.make({ role: "tool", content: [{ type: "tool-result", id: `sys-call-${index}`, name: "read",
+                result: { type: "text", value: `system-era-${index} ` + "historical output ".repeat(500) } }] }),
+        ]).flat(), Message.user("Continue the current task")]
+    const local = { ...config, compaction: { ...config.compaction, custom: { ...config.compaction.custom,
+        recentToolTokens: 0, prefixSummary: false } } }
+    const input = { config: local, projectRoot: root, contextLimit: v2Codec.estimateTurns(v2Codec.encode(old.slice(2))) + 100 }
+    const first = { sessionID: "ses_system_barrier", messages: [...old] }
+    assert.equal((await compactV2Context(first, input)).status, "applied")
+    assert.equal(first.messages[0], earlier)
+    assert.equal(first.messages[1], authority)
+    assert.equal(first.messages.at(-1), old.at(-1))
+    const catalog = await loadV2Catalog(root, first.sessionID)
+    assert.equal(catalog.entries.length, 1)
+    assert.ok(catalog.entries[0]?.messageIDs.every((id) => !id.startsWith("bcv-0-") && !id.startsWith("bcv-1-")))
+    const archived = await readV2Archive(root, first.sessionID, catalog.entries[0]!.id)
+    assert.ok(archived.every((message) => message.role !== "system"))
+    const newAssistant = Message.assistant("This answer was written after the replay and must stay literal")
+    const newCall = Message.make({ role: "assistant", content: [{ type: "tool-call", id: "later-result", name: "read", input: { path: "new.ts" } }] })
+    const newTool = Message.make({ role: "tool", content: [{ type: "tool-result", id: "later-result", name: "read",
+        result: { type: "text", value: "A new result ".repeat(1_200) } }] })
+    const appended = { sessionID: first.sessionID, messages: [...old, newAssistant, newCall, newTool] }
+    assert.equal((await compactV2Context(appended, input)).status, "applied")
+    assert.deepEqual(appended.messages.slice(-3), [newAssistant, newCall, newTool])
+    const replay = { sessionID: first.sessionID, messages: [...old, newAssistant, newCall, newTool] }
+    assert.equal((await compactV2Context(replay, input)).status, "applied")
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(appended.messages))
+    assert.equal((await loadV2Catalog(root, first.sessionID)).entries.length, 1)
+})
+
+test("tool continuations after a system update prune without inventing a new human or losing the old one", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-system-tool-loop-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const human = Message.user("Keep all previous user constraints intact")
+    const authority = Message.make({ role: "system", content: [Message.text("Operator update: keep the original task intact")] })
+    const older = [human, authority, ...Array.from({ length: 15 }, (_, index) => [
+        Message.make({ role: "assistant", content: [{ type: "tool-call", id: `loop-${index}`, name: "read", input: {} }] }),
+        Message.make({ role: "tool", content: [{ type: "tool-result", id: `loop-${index}`, name: "read",
+            result: { type: "text", value: "Earlier tool observation ".repeat(450) } }] }),
+    ]).flat(), Message.assistant("The final implementation decision stays available")]
+    const local = { ...config, compaction: { ...config.compaction, custom: { ...config.compaction.custom,
+        recentToolTokens: 0, prefixSummary: true } } }
+    let calls = 0
+    const input = { config: local, projectRoot: root,
+        contextLimit: v2Codec.estimateTurns(v2Codec.encode(older.slice(2))) + 100,
+        summary: { modelContextLimit: 100000, generate: async () => { calls++; return "not needed" } } }
+    const event = { sessionID: "ses_system_no_new_user", messages: [...older] }
+    const result = await compactV2Context(event, input)
+    assert.equal(result.status, "applied")
+    assert.equal(result.selectedStrategy, "cheap")
+    assert.equal(event.messages[0], human)
+    assert.equal(event.messages[1], authority)
+    assert.equal(event.messages.at(-1), older.at(-1))
+    assert.equal(calls, 0, "do not hallucinate a replacement handoff without a new human after the system barrier")
+    const replay = { sessionID: event.sessionID, messages: [...older] }
+    assert.equal((await compactV2Context(replay, input)).status, "applied")
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(event.messages))
+})
+
+test("a later system update starts a new archive epoch instead of replaying an old checkpoint", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-system-epochs-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const old = [Message.user("Keep the original human instruction"),
+        ...Array.from({ length: 10 }, (_, index) => [
+            Message.make({ role: "assistant", content: [{ type: "tool-call", id: `epoch-a-${index}`, name: "read", input: {} }] }),
+            Message.make({ role: "tool", content: [{ type: "tool-result", id: `epoch-a-${index}`, name: "read",
+                result: { type: "text", value: "Old logs ".repeat(350) } }] }),
+        ]).flat(), Message.user("Finish the previous tests")]
+    const local = { ...config, compaction: { ...config.compaction, custom: { ...config.compaction.custom,
+        recentToolTokens: 0, prefixSummary: false } } }
+    const first = { sessionID: "ses_epoch_change", messages: [...old] }
+    assert.equal((await compactV2Context(first, { config: local, projectRoot: root,
+        contextLimit: v2Codec.estimateTurns(v2Codec.encode(old)) + 100 })).status, "applied")
+    const barrier = Message.make({ role: "system", content: [Message.text("New operator instruction supersedes older instructions")], })
+    const following = [Message.user("Keep the new user correction"),
+        ...Array.from({ length: 10 }, (_, index) => [
+            Message.make({ role: "assistant", content: [{ type: "tool-call", id: `epoch-b-${index}`, name: "read", input: {} }] }),
+            Message.make({ role: "tool", content: [{ type: "tool-result", id: `epoch-b-${index}`, name: "read",
+                result: { type: "text", value: "New logs ".repeat(350) } }] }),
+        ]).flat(), Message.user("Continue safely")]
+    const full = [...old, barrier, ...following]
+    const input = { config: local, projectRoot: root,
+        contextLimit: v2Codec.estimateTurns(v2Codec.encode([...old, ...following])) + 150 }
+    const second = { sessionID: first.sessionID, messages: [...full] }
+    assert.equal((await compactV2Context(second, input)).status, "applied")
+    full.slice(0, old.length + 1).forEach((message, index) => assert.equal(second.messages[index], message))
+    assert.equal(second.messages.at(-1), full.at(-1))
+    const catalog = await loadV2Catalog(root, first.sessionID)
+    assert.equal(catalog.entries.length, 2)
+    assert.notEqual(catalog.entries[0]?.authorityKey, catalog.entries[1]?.authorityKey)
+    assert.equal(catalog.replayFrontier?.authorityKey, catalog.entries[1]?.authorityKey)
+    const replay = { sessionID: first.sessionID, messages: [...full] }
+    assert.equal((await compactV2Context(replay, input)).status, "applied")
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(second.messages))
+    assert.equal((await loadV2Catalog(root, first.sessionID)).entries.length, 2)
+})
+
+test("a replacement handoff after a system update cannot reuse the prior authority checkpoint", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-handoff-authority-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const previous = [Message.user("Retain the original task constraint"),
+        ...Array.from({ length: 12 }, (_, index) => Message.assistant(
+            `Earlier decision ${index}; ${"prior diagnostic ".repeat(180)}`)),
+        Message.user("Complete the first test group")]
+    const authority = Message.make({ role: "system", content: [Message.text("New authority: verify the second test group")] })
+    const subsequent = [Message.user("Retain this new constraint and verify the second test group"),
+        ...Array.from({ length: 12 }, (_, index) => Message.assistant(
+            `Second test decision ${index}; ${"new diagnostic ".repeat(180)}`)),
+        Message.user("Finish the second test group")]
+    const handoff = (which: string) => ["## Decisions", `- Test group ${which} remains in progress.`,
+        "## Files & Symbols", "- src/feature.ts and tests/feature.test.ts.",
+        "## Errors (verbatim)", "- No confirmed regression.",
+        "## What failed and why", "- Routine diagnostics hid the current test decision.",
+        "## Constraints", which === "first" ? "- Retain the original task constraint." :
+            "- Retain this new constraint and verify the second test group.",
+        "## Next step", which === "first" ? "- Complete the first test group." : "- Finish the second test group."].join("\n")
+    let calls = 0
+    const summary = { modelContextLimit: 100000, generate: async (_prompt: string, variant?: string) => {
+        calls++
+        return variant ? JSON.stringify({ handoff: handoff(calls <= 2 ? "first" : "second") }) :
+            "Implementation diagnostics and the required test group progression"
+    } }
+    const first = { sessionID: "ses_authority_handoff", messages: [...previous] }
+    assert.equal((await compactV2Context(first, { config, projectRoot: root,
+        contextLimit: v2Codec.estimateTurns(v2Codec.encode(previous)) + 100, summary })).status, "applied")
+    const originalCheckpoint = (await loadV2Catalog(root, first.sessionID)).checkpoint
+    assert.ok(originalCheckpoint)
+    const full = [...previous, authority, ...subsequent]
+    const input = { config, projectRoot: root,
+        contextLimit: v2Codec.estimateTurns(v2Codec.encode([...previous, ...subsequent])) + 200, summary }
+    const second = { sessionID: first.sessionID, messages: [...full] }
+    const result = await compactV2Context(second, input)
+    assert.equal(result.status, "applied")
+    assert.equal(result.selectedStrategy, "new-handoff")
+    assert.equal(calls, 4)
+    full.slice(0, previous.length + 1).forEach((message, index) => assert.equal(second.messages[index], message))
+    assert.equal(second.messages.at(-1), subsequent.at(-1))
+    const catalog = await loadV2Catalog(root, first.sessionID)
+    assert.equal(catalog.entries.length, 2)
+    assert.notEqual(catalog.checkpoint?.authorityKey, originalCheckpoint.authorityKey)
+    assert.equal(catalog.checkpoint?.authorityKey, catalog.replayFrontier?.authorityKey)
+    const replay = { sessionID: first.sessionID, messages: [...full] }
+    assert.equal((await compactV2Context(replay, input)).status, "applied")
+    assert.equal(calls, 4)
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(second.messages))
 })
 
 test("V2 seam leaves below-trigger requests untouched", async (t) => {
@@ -239,8 +493,10 @@ test("V2 round two retires only exact older ready wording after a validated repl
         contextLimit: v2Codec.estimateTurns(v2Codec.encode(firstHistory)) + 100, summary })).status, "applied")
     assert.ok(initial.messages.some((message) => message.id === requirement.id))
     const second = { sessionID: "ses_rounds", messages: [...secondHistory] }
-    assert.equal((await compactV2Context(second, { config, projectRoot: root,
-        contextLimit: v2Codec.estimateTurns(v2Codec.encode(secondHistory)) + 100, summary })).status, "applied")
+    const secondOutcome = await compactV2Context(second, { config, projectRoot: root,
+        contextLimit: v2Codec.estimateTurns(v2Codec.encode(secondHistory)) + 100, summary })
+    assert.equal(secondOutcome.status, "applied", JSON.stringify({ secondOutcome, calls,
+        catalog: await loadV2Catalog(root, "ses_rounds") }))
     assert.equal(calls, 4)
     const catalog = await loadV2Catalog(root, "ses_rounds")
     assert.equal(catalog.entries.length, 2)
@@ -250,4 +506,9 @@ test("V2 round two retires only exact older ready wording after a validated repl
     assert.match(JSON.stringify(second.messages), /Never overwrite user files/)
     const archived = await readV2Archive(root, "ses_rounds", catalog.entries[0]!.id)
     assert.equal(JSON.stringify(archived[0]), JSON.stringify(requirement))
+    const replay = { sessionID: second.sessionID, messages: [...secondHistory] }
+    assert.equal((await compactV2Context(replay, { config, projectRoot: root,
+        contextLimit: v2Codec.estimateTurns(v2Codec.encode(secondHistory)) + 100, summary })).status, "applied")
+    assert.equal(calls, 4, "the second handoff must replay without another Luna call")
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(second.messages), "round two must also replay byte-identically")
 })

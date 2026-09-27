@@ -18,9 +18,11 @@ extension in the terminal:
 ```
 
 For a local checkout, build first and point `plugins` to the package **directory**,
-not a `.ts` file. Configure the optional automatic fallback separately with
-OpenCode's native `compaction.auto` setting. The plugin does not silently change
-that setting or hijack the built-in `/compact` command.
+not a `.ts` file. Keep OpenCode's `compaction.auto` enabled for native overflow
+recovery: the V2 server-plugin session API does not expose a `compact()` action,
+so Better Compact cannot guarantee that a host-initiated native checkpoint runs
+*only after* its pruning attempt. The plugin does not silently change that
+setting or hijack the built-in `/compact` command.
 
 ## Behavior
 
@@ -40,6 +42,11 @@ that setting or hijack the built-in `/compact` command.
   only after a later validated handoff includes its exact current wording and
   its own session archive is verified. Encrypted reasoning/checkpoints are
   never replaced by an ordinary text summary.
+- The first successful request records a hash-checked replay frontier. New
+  assistant, tool and user messages stay native on every replay; only a new,
+  validated handoff can advance that frontier. A chronological system update
+  starts another authority epoch: the entire prefix through that update stays
+  exact, and only later tools can be pruned before another human turn arrives.
 - The `better_compact_recall` tool exposes a bounded, explicit catalog, excerpt
   or exact UTF-8 page. It is tool-permission gated and refuses foreign sessions,
   changed files, expired archives and arbitrary model-supplied paths. Recalled

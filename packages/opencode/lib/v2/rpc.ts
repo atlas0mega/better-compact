@@ -21,9 +21,11 @@ export const BetterCompactRPC = Rpc.define({
                 providerTokens: { type: "integer" }, contextLimit: { type: "integer" },
                 summaryAvailable: { type: "boolean" },
                 summaryFailure: { type: "string" },
+                errorPhase: { type: "string" },
+                errorSite: { type: "string" },
             }, required: ["archiveCount", "readyCount", "hasCheckpoint", "retirementThrough",
                 "lastStatus", "beforeTokens", "afterTokens", "candidateTokens", "validationFailure", "selectedStrategy", "handoffVisible", "triggerTokens", "targetTokens",
-                "reason", "systemMessageCount", "providerTokens", "contextLimit", "summaryAvailable", "summaryFailure"],
+                "reason", "systemMessageCount", "providerTokens", "contextLimit", "summaryAvailable", "summaryFailure", "errorPhase", "errorSite"],
                 additionalProperties: false },
         },
     },
@@ -60,7 +62,9 @@ export async function registerV2RPC(ctx: Context): Promise<void> {
                 systemMessageCount: tokens("systemMessageCount"),
                 providerTokens: tokens("providerTokens"), contextLimit: tokens("contextLimit"),
                 summaryAvailable: last.summaryAvailable === true,
-                summaryFailure: catalog.summaryAttempt?.reason ?? "none" }
+                summaryFailure: catalog.summaryAttempt?.reason ?? "none",
+                errorPhase: typeof last.errorPhase === "string" ? last.errorPhase : "none",
+                errorSite: typeof last.errorSite === "string" ? last.errorSite : "none" }
         },
     })
 }

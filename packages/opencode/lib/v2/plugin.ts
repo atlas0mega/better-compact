@@ -16,6 +16,16 @@ function safeFailureCode(error: unknown): string {
         text.includes(code)) ?? (error instanceof Error ? error.name : "unknown")
 }
 
+function safeFailureSite(error: unknown): string {
+    if (!(error instanceof Error)) return "unknown"
+    const frames = (error.stack ?? "").split("\n").slice(1)
+    for (const frame of frames) {
+        const site = /(?:packages\/core\/(?:src|dist)|packages\/opencode\/lib\/v2)\/([a-zA-Z0-9._/-]+):(\d+)(?::\d+)?/.exec(frame)
+        if (site) return `${site[1]}:${site[2]}`
+    }
+    return "external"
+}
+
 /** V2-only server plugin; every request is validated before the provider sees it. */
 export default Plugin.define({
     id: "better-compact",
@@ -50,30 +60,45 @@ export default Plugin.define({
             }
         }
         await ctx.session.hook("context", async (event) => {
+            let phase = "session"
+            let providerTokens = 0
+            let contextLimit = 0
+            let summaryAvailable = false
             try {
                 const session = await ctx.session.get({ sessionID: event.sessionID })
+                phase = "config"
                 const config = await loadV2Config(session.location.directory, event.model)
+                phase = "housekeeping"
                 await expireV2Archives(session.location.directory, event.sessionID)
                 if (session.parentID && !config.experimental.allowSubAgents) return
+                phase = "model"
                 const model = (await ctx.model.list()).data.find((candidate) =>
                     candidate.providerID === event.model.providerID && candidate.id === event.model.id)
+                contextLimit = model?.limit.context ?? 0
+                phase = "history"
                 const history = await ctx.session.context({ sessionID: event.sessionID })
+                providerTokens = lastProviderTokens(history) ?? 0
+                phase = "summary-model"
                 const summary = await summaryFor(event.model, config)
-                const providerTokens = lastProviderTokens(history)
+                summaryAvailable = !!summary
+                phase = "transform"
                 const outcome = await compactV2Context(event, {
                     config,
                     projectRoot: session.location.directory,
                     contextLimit: model?.limit.context,
-                    providerReportedTokens: providerTokens,
+                    providerReportedTokens: providerTokens || undefined,
                     ...(summary ? { summary } : {}),
+                    trace: (current) => { phase = current },
                 })
+                phase = "status-write"
                 await ctx.storage.set(`status/${event.sessionID}`, {
                     status: outcome.status,
                     reason: outcome.reason ?? "none",
                     systemMessageCount: event.messages.filter((message) => message.role === "system").length,
-                    providerTokens: providerTokens ?? 0,
-                    contextLimit: model?.limit.context ?? 0,
-                    summaryAvailable: !!summary,
+                    providerTokens,
+                    contextLimit,
+                    summaryAvailable,
+                    errorPhase: "none",
                     beforeTokens: outcome.beforeTokens ?? 0,
                     afterTokens: outcome.afterTokens ?? outcome.beforeTokens ?? 0,
                     candidateTokens: outcome.candidateTokens ?? outcome.afterTokens ?? outcome.beforeTokens ?? 0,
@@ -88,15 +113,18 @@ export default Plugin.define({
                 // A failed optional transform must not silently remove any
                 // original request content. No prompt/raw exception details in logs.
                 await ctx.storage.set(`status/${event.sessionID}`, {
-                    status: "error", reason: safeFailureCode(error),
-                    selectedStrategy: "none", handoffVisible: false, summaryAvailable: false,
+                    status: "error", reason: safeFailureCode(error), errorPhase: phase,
+                    errorSite: safeFailureSite(error),
+                    selectedStrategy: "none", handoffVisible: false, summaryAvailable,
                     systemMessageCount: event.messages.filter((message) => message.role === "system").length,
-                    providerTokens: 0, contextLimit: 0, beforeTokens: 0, afterTokens: 0,
+                    providerTokens, contextLimit, beforeTokens: 0, afterTokens: 0,
                     candidateTokens: 0, triggerTokens: 0, targetTokens: 0,
                     validationFailure: "none", at: Date.now(),
                 }).catch(() => undefined)
                 console.warn("Better Compact V2 context transform declined", {
                     error: safeFailureCode(error),
+                    phase,
+                    site: safeFailureSite(error),
                 })
             }
         })

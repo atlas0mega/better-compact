@@ -59,7 +59,20 @@ export const v2Codec: Codec<Message> = {
             // A pruned tool result with no remaining parts cannot be sent as
             // an empty tool response; the matching call is validated below.
             if (native && content.length === 0) return []
-            if (native) return [Message.make({ ...native, content })]
+            if (native) {
+                if (content.length === native.content.length && content.every((part, index) => part === native.content[index]))
+                    return [native]
+                try {
+                    return [Message.make({ ...native, content })]
+                } catch {
+                    // Real V2 requests may contain host/provider-native parts
+                    // that cannot be constructed a second time after changing
+                    // another part of their message. Keep the exact source
+                    // message, rather than failing the entire transform or
+                    // stripping a provider checkpoint/reasoning payload.
+                    return [native]
+                }
+            }
             const base = messages.find((message) => message.role === "user")
             if (!base) throw new Error("Cannot insert a compacted handoff without a source user turn")
             return [Message.make({ role: "user", id: `bc-${turn.key}`, content, metadata: { betterCompact: "handoff", untrusted: true } })]
@@ -91,6 +104,7 @@ export const v2Conventions: Conventions = {
     },
     isPreservedItem(item) {
         if (item.kind === "synthetic") return false
+        if (item.kind === "opaque") return true
         const part = partOf(item)
         return part.type === "compaction" || (part.type === "reasoning" && !!part.encrypted)
     },

@@ -9,6 +9,14 @@ export function validateRequestTransform(before: readonly Message[], after: read
         if (!condition) throw new Error(`Unsafe Better Compact V2 transform: ${reason}`)
     }
     invariant(before.every((message) => !!message.id), "native message without stable ID")
+    const lastSystem = before.findLastIndex((message) => message.role === "system")
+    const systems = before.filter((message) => message.role === "system")
+    const emittedSystems = after.filter((message) => message.role === "system")
+    invariant(emittedSystems.every((message) => systems.includes(message)), "new system message")
+    invariant(emittedSystems.length === systems.length && emittedSystems.every((message, index) =>
+        message === systems[index]), "system authority prefix changed")
+    if (lastSystem >= 0) invariant(before.slice(0, lastSystem + 1).every((message, index) =>
+        after[index] === message), "system authority prefix changed")
     const original = new Map(before.map((message) => [message.id!, message]))
     const emitted = new Set<string>()
     const calls = new Map<string, number>()
@@ -53,7 +61,8 @@ export function validateRequestTransform(before: readonly Message[], after: read
                 `human instruction removed or rewritten: ${message.id}`)
         }
         for (const part of message.content) {
-            if (part.type !== "compaction" && !(part.type === "reasoning" && part.encrypted)) continue
+            if (part.type !== "compaction" && part.type !== "media" && part.type !== "effort" &&
+                !(part.type === "reasoning" && part.encrypted)) continue
             invariant(after.some((candidate) => candidate.id === message.id && candidate.content.some((current) =>
                 JSON.stringify(current) === JSON.stringify(part))), `opaque provider state removed: ${message.id}`)
         }

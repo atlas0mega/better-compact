@@ -145,11 +145,15 @@ try {
     if (!second.includes("Never overwrite user files") || !second.includes("current test decision") ||
         !third.includes("Never overwrite user files") || !third.includes("Continue the implementation"))
         throw new Error("V2 provider-visible continuation dropped human intent")
+    if (!third.includes("The original human constraint remains in context and the next step is clear."))
+        throw new Error("V2 replay discarded newly generated assistant work")
     const status = JSON.parse(await run(executable, env, project, ["api", "--server", address,
         "post", "/api/rpc/better-compact/status", "--data", JSON.stringify({ input: { sessionID } })])).output
     if (status?.lastStatus !== "applied" || status.afterTokens >= status.beforeTokens || status.archiveCount < 1)
         throw new Error(`V2 context hook did not shrink the request: ${JSON.stringify(status)}`)
     const catalog = JSON.parse(await readFile(path.join(project, ".opencode", "better-compact", "v2", "sessions", sessionID, "catalog.json"), "utf8"))
+    if (catalog.entries.length !== 1 || !catalog.replayFrontier?.prefixSha256 || summaries.length !== 0)
+        throw new Error("V2 tool continuation advanced the replay frontier or paid for another handoff")
     const recovered = []
     for (const entry of catalog.entries) {
         const raw = await readFile(path.join(project, ".opencode", "better-compact", "v2", "sessions", sessionID,

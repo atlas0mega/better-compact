@@ -61,6 +61,7 @@ export interface V2ArchiveEntry {
     createdAt: string
     status: "pending" | "ready" | "expired"
     description?: string
+    authorityKey?: string
 }
 
 export interface V2ArchiveCatalog {
@@ -73,9 +74,41 @@ export interface V2ArchiveCatalog {
         archiveID: string
         handoff: string
         validatedAt: string
+        authorityKey?: string
     }
-    summaryAttempt?: { rangeHash: string; archiveID: string; reason: string; calls: number; at: string }
+    summaryAttempt?: { rangeHash: string; archiveID: string; reason: string; calls: number; at: string; authorityKey?: string }
     retirementThrough?: number
+    /** Distinguish a prepared archive from a model-visible transform. */
+    replayState?: "unapplied" | "applied"
+    /** Latest validated replay boundary. Every later native message stays raw until a replacement handoff. */
+    replayFrontier?: { anchors: Array<{ id: string; sha256: string }>; prefixSha256: string; authorityKey?: string; at: string }
+}
+
+/** Bind the whole native prefix, not just the last ID: earlier edits may leave
+ * the last ID unchanged while invalidating an archived handoff. */
+export function v2ReplayPrefixHash(messages: readonly Message[], originals: ReadonlyMap<string, Message>): string {
+    return digest(JSON.stringify(messages.map((message) => originals.get(message.id!) ?? message)))
+}
+
+/** Commit the first successful replay boundary before mutating the outgoing
+ * request. Only a validated replacement handoff may advance it later. */
+export async function saveV2ReplayFrontier(root: string, sessionID: string, messages: readonly Message[],
+    originals: ReadonlyMap<string, Message>, advance = false, authorityKey?: string): Promise<void> {
+    return withCatalogLock(root, sessionID, async () => {
+        const catalog = await loadV2Catalog(root, sessionID)
+        if (catalog.replayFrontier && !advance) return
+        if (!catalog.entries.some((entry) => entry.status !== "expired" && entry.authorityKey === authorityKey))
+            throw new Error("Missing exact V2 archive for replay")
+        const anchors = messages.slice(-8).map((message) => {
+            if (!message.id || message.id.length > 512) throw new Error("Invalid replay message identity")
+            return { id: message.id, sha256: digest(JSON.stringify(originals.get(message.id) ?? message)) }
+        })
+        if (!anchors.length) throw new Error("Empty replay boundary")
+        catalog.replayFrontier = { anchors, prefixSha256: v2ReplayPrefixHash(messages, originals),
+            authorityKey, at: new Date().toISOString() }
+        catalog.replayState = "applied"
+        await writePrivateFile(catalogFile(catalog.projectRoot, sessionID), JSON.stringify(catalog), catalog.projectRoot)
+    })
 }
 
 export async function loadV2Catalog(root: string, sessionID: string): Promise<V2ArchiveCatalog> {
@@ -113,19 +146,22 @@ export async function readV2Archive(root: string, sessionID: string, id: string)
 
 /** Only byte-identical, older, ready human messages may leave a validated second checkpoint. */
 export async function retiredV2HumanIDs(root: string, sessionID: string, source: readonly Message[],
-    through?: number, validatedHandoff?: string, originals: ReadonlyMap<string, Message> = new Map()): Promise<Set<string>> {
+    through?: number, validatedHandoff?: string, originals: ReadonlyMap<string, Message> = new Map(),
+    authorityKey?: string): Promise<Set<string>> {
     const ids = new Set<string>()
     if (!through) return ids
     const catalog = await loadV2Catalog(root, sessionID)
-    const proposed = !!catalog.checkpoint && catalog.entries.some((item) => item.sequence === through + 1) &&
-        catalog.entries.filter((item) => item.sequence <= through).every((item) => item.status === "ready" && !!item.description)
+    const proposed = catalog.checkpoint?.authorityKey === authorityKey &&
+        catalog.entries.some((item) => item.sequence === through + 1 && item.authorityKey === authorityKey) &&
+        catalog.entries.filter((item) => item.authorityKey === authorityKey && item.sequence <= through)
+            .every((item) => item.status === "ready" && !!item.description)
     if (through > (catalog.retirementThrough ?? 0) && !proposed)
         throw new Error("Unvalidated archive retirement boundary")
     const current = new Map(source.filter((message) => message.role === "user" && message.id)
         .map((message) => [message.id!, JSON.stringify(originals.get(message.id!) ?? message)]))
     const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ")
     const handoff = normalize(validatedHandoff ?? "")
-    const cohort = catalog.entries.filter((item) => item.sequence <= through)
+    const cohort = catalog.entries.filter((item) => item.authorityKey === authorityKey && item.sequence <= through)
     if (cohort.some((entry) => entry.status !== "ready" || !entry.description)) return ids
     for (const entry of cohort) {
         for (const [index, message] of (await readV2Archive(root, sessionID, entry.id)).entries()) {
@@ -140,12 +176,13 @@ export async function retiredV2HumanIDs(root: string, sessionID: string, source:
 
 /** Archive exact original message values, never a pruned or synthetic request. */
 export async function appendV2Archive(root: string, sessionID: string, messages: readonly Message[],
-    originals: ReadonlyMap<string, Message> = new Map()): Promise<V2ArchiveEntry | null> {
+    originals: ReadonlyMap<string, Message> = new Map(), authorityKey?: string): Promise<V2ArchiveEntry | null> {
     return withCatalogLock(root, sessionID, async () => {
     const catalog = await loadV2Catalog(root, sessionID)
+    if (!catalog.entries.length) catalog.replayState = "unapplied"
     const covered = new Set<string>()
     for (const entry of catalog.entries) {
-        if (entry.status === "expired") continue
+        if (entry.status === "expired" || entry.authorityKey !== authorityKey) continue
         // Validate old files before relying on coverage: do not silently skip
         // history if an archive was removed or modified outside the plugin.
         const old = await readV2Archive(catalog.projectRoot, sessionID, entry.id)
@@ -164,7 +201,7 @@ export async function appendV2Archive(root: string, sessionID: string, messages:
     const id = `c${String(sequence).padStart(6, "0")}-${sha256.slice(0, 12)}`
     const entry: V2ArchiveEntry = {
         id, sequence, sha256, messageIDs: delta.map((message) => message.id!),
-        createdAt: new Date().toISOString(), status: "pending",
+        createdAt: new Date().toISOString(), status: "pending", authorityKey,
     }
     await writePrivateFile(join(catalog.projectRoot, ".opencode", "better-compact", ".gitignore"), "*\n!.gitignore\n", catalog.projectRoot)
     const path = archiveFile(catalog.projectRoot, sessionID, id)
@@ -188,38 +225,41 @@ export async function appendV2Archive(root: string, sessionID: string, messages:
 
 /** Publish validated checkpoint and description together; replay cannot publish an unverified model draft. */
 export async function saveV2Checkpoint(root: string, sessionID: string, input: {
-    rangeHash: string; archiveID: string; handoff: string; description: string; recentUserIntent: string[]
+    rangeHash: string; archiveID: string; handoff: string; description: string; recentUserIntent: string[]; authorityKey?: string
 }): Promise<void> {
     return withCatalogLock(root, sessionID, async () => {
     if (!/^[a-f0-9]{16}$/.test(input.rangeHash)) throw new Error("Invalid checkpoint range hash")
     const catalog = await loadV2Catalog(root, sessionID)
     if (validateV2Handoff(JSON.stringify({ handoff: input.handoff }), input.recentUserIntent,
-        catalog.checkpoint?.handoff) !== input.handoff ||
+        catalog.checkpoint?.authorityKey === input.authorityKey ? catalog.checkpoint?.handoff : undefined) !== input.handoff ||
         validateV2Description(input.description, input.archiveID) !== input.description)
         throw new Error("Unvalidated checkpoint or description")
     const entry = catalog.entries.find((item) => item.id === input.archiveID && item.status !== "expired")
-    if (!entry) throw new Error("Missing archive for checkpoint")
+    if (!entry || entry.authorityKey !== input.authorityKey) throw new Error("Missing archive for checkpoint")
     await readV2Archive(root, sessionID, entry.id)
-    if (catalog.checkpoint?.rangeHash === input.rangeHash) {
+    if (catalog.checkpoint?.rangeHash === input.rangeHash && catalog.checkpoint.authorityKey === input.authorityKey) {
         if (catalog.checkpoint.handoff !== input.handoff || catalog.checkpoint.archiveID !== entry.id)
             throw new Error("Conflicting checkpoint for this range")
         return
     }
     entry.description = input.description
     entry.status = "ready"
-    if (catalog.checkpoint && entry.sequence >= 2 && catalog.entries
-        .filter((item) => item.sequence < entry.sequence)
+    if (catalog.checkpoint?.authorityKey === input.authorityKey && entry.sequence >= 2 &&
+        catalog.entries.some((item) => item.authorityKey === input.authorityKey && item.sequence < entry.sequence) &&
+        catalog.entries
+        .filter((item) => item.authorityKey === input.authorityKey && item.sequence < entry.sequence)
         .every((item) => item.status === "ready" && !!item.description))
         catalog.retirementThrough = entry.sequence - 1
+    if (catalog.checkpoint?.authorityKey !== input.authorityKey) delete catalog.retirementThrough
     catalog.checkpoint = { rangeHash: input.rangeHash, archiveID: entry.id, handoff: input.handoff,
-        validatedAt: new Date().toISOString() }
+        authorityKey: input.authorityKey, validatedAt: new Date().toISOString() }
     await writePrivateFile(catalogFile(catalog.projectRoot, sessionID), JSON.stringify(catalog), catalog.projectRoot)
     })
 }
 
 /** Failed model calls are not retried for the same unchanged boundary. */
 export async function recordV2SummaryFailure(root: string, sessionID: string, input: {
-    rangeHash: string; archiveID: string; reason: string; calls: number
+    rangeHash: string; archiveID: string; reason: string; calls: number; authorityKey?: string
 }): Promise<void> {
     return withCatalogLock(root, sessionID, async () => {
     if (!/^[a-f0-9]{16}$/.test(input.rangeHash) ||
@@ -227,7 +267,8 @@ export async function recordV2SummaryFailure(root: string, sessionID: string, in
         !Number.isSafeInteger(input.calls) || input.calls < 0 || input.calls > 7)
         throw new Error("Invalid summary failure metadata")
     const catalog = await loadV2Catalog(root, sessionID)
-    if (!catalog.entries.some((entry) => entry.id === input.archiveID && entry.status !== "expired"))
+    if (!catalog.entries.some((entry) => entry.id === input.archiveID && entry.status !== "expired" &&
+        entry.authorityKey === input.authorityKey))
         throw new Error("Missing archive for summary failure")
     catalog.summaryAttempt = { ...input, at: new Date().toISOString() }
     await writePrivateFile(catalogFile(catalog.projectRoot, sessionID), JSON.stringify(catalog), catalog.projectRoot)
