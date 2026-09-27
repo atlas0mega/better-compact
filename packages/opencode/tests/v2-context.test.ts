@@ -131,6 +131,31 @@ test("a stable replay never prunes or rearchives newly appended assistant, tool,
     assert.equal((await loadV2Catalog(root, first.sessionID)).entries.length, 1)
 })
 
+test("a native checkpoint protects every newer encrypted assistant message even after another human prompt", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-native-tail-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const newer = [Message.user("New task since native replay"),
+        Message.make({ role: "assistant", content: [
+            { type: "reasoning", text: "", encrypted: "encrypted-since-replay" },
+            Message.text("New implementation decision, still exact"),
+        ] }),
+        Message.user("Newest correction: keep that decision"),
+    ]
+    const messages = [Message.user("Older constraint"),
+        Message.assistant("Older work ".repeat(3_000)),
+        Message.assistant([{ type: "compaction", provider: "openai", encrypted: "older-checkpoint" }]),
+        ...newer]
+    const event = { sessionID: "ses_native_tail", messages: [...messages] }
+    const outcome = await compactV2Context(event, { projectRoot: root, config: {
+        ...config, compaction: { ...config.compaction, custom: { ...config.compaction.custom, prefixSummary: false } },
+    }, contextLimit: 15_000, fallbackCeiling: 1_000 })
+    assert.equal(outcome.protectedTailMessages, newer.length)
+    assert.deepEqual(event.messages.slice(-newer.length), newer)
+    if (outcome.status === "applied") {
+        assert.equal(JSON.stringify(event.messages.slice(-newer.length)), JSON.stringify(newer))
+    }
+})
+
 test("an earlier in-place edit cannot replay a historical prefix under the same last ID", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "bc-v2-revised-prefix-"))
     t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
@@ -348,6 +373,68 @@ test("V2 seam leaves below-trigger requests untouched", async (t) => {
     const event = { sessionID: "ses_small", messages: [message] }
     assert.equal((await compactV2Context(event, { config, projectRoot: root, contextLimit: 200000 })).status, "below-trigger")
     assert.deepEqual(event.messages, [message])
+})
+
+test("a host fallback ceiling never publishes an oversized pruned request or replay frontier", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-native-fallback-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const source = [Message.user("Never overwrite user files"),
+        ...Array.from({ length: 12 }, (_, index) => [
+            Message.make({ role: "assistant", content: [{ type: "tool-call", id: `fallback-${index}`, name: "read", input: {} }] }),
+            Message.make({ role: "tool", content: [{ type: "tool-result", id: `fallback-${index}`, name: "read",
+                result: { type: "text", value: "Old diagnostics ".repeat(300) } }] }),
+        ]).flat(), Message.user("Current task and constraints ".repeat(1_000))]
+    const local = { ...config, compaction: { ...config.compaction, custom: { ...config.compaction.custom,
+        recentToolTokens: 0, prefixSummary: false } } }
+    const input = { config: local, projectRoot: root,
+        contextLimit: v2Codec.estimateTurns(v2Codec.encode(source)) + 100, fallbackCeiling: 500 }
+    const first = { sessionID: "ses_native_fallback", messages: [...source] }
+    const result = await compactV2Context(first, input)
+    assert.equal(result.reason, "needs-native-fallback")
+    assert.equal(result.status, "declined")
+    assert.equal(JSON.stringify(first.messages), JSON.stringify(source))
+    const catalog = await loadV2Catalog(root, first.sessionID)
+    assert.equal(catalog.entries.length, 1)
+    assert.equal(catalog.replayState, "unapplied")
+    assert.equal(catalog.replayFrontier, undefined)
+    assert.equal(JSON.stringify(await readV2Archive(root, first.sessionID, catalog.entries[0]!.id)),
+        JSON.stringify(source.slice(0, catalog.entries[0]!.messageIDs.length)))
+    const replay = { sessionID: first.sessionID, messages: [...source] }
+    assert.equal((await compactV2Context(replay, input)).reason, "needs-native-fallback")
+    assert.equal(JSON.stringify(replay.messages), JSON.stringify(source))
+    assert.equal((await loadV2Catalog(root, first.sessionID)).entries.length, 1)
+})
+
+test("a validated Luna draft is not published when only native fallback can fit", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "bc-v2-handoff-fallback-"))
+    t.after(async () => { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }) })
+    const messages = [Message.user("Never overwrite user files"),
+        ...Array.from({ length: 12 }, (_, index) => Message.assistant(
+            `Implementation ${index}: ${"Old diagnostic detail ".repeat(200)}`)),
+        Message.user("Finish the active tests")]
+    const handoff = ["## Decisions", "- Preserve existing files and complete the implementation.",
+        "## Files & Symbols", "- src/feature.ts and tests/feature.test.ts remain active.",
+        "## Errors (verbatim)", "- Old diagnostic detail was resolved.",
+        "## What failed and why", "- Repeated historical output hid the next action.",
+        "## Constraints", "- Never overwrite user files.", "## Next step", "- Finish the active tests."].join("\n")
+    let calls = 0
+    const input = { config, projectRoot: root, contextLimit: v2Codec.estimateTurns(v2Codec.encode(messages)) + 100,
+        fallbackCeiling: 100, summary: { modelContextLimit: 100000,
+            generate: async (_prompt: string, variant: string | undefined) => {
+                calls++
+                return variant ? JSON.stringify({ handoff }) : "Validated implementation, historical diagnostics and tests"
+            } } }
+    const event = { sessionID: "ses_handoff_fallback", messages: [...messages] }
+    assert.equal((await compactV2Context(event, input)).reason, "needs-native-fallback")
+    assert.equal(JSON.stringify(event.messages), JSON.stringify(messages))
+    const catalog = await loadV2Catalog(root, event.sessionID)
+    assert.equal(catalog.checkpoint, undefined, "a handoff the model never saw cannot become the replay checkpoint")
+    assert.equal(catalog.replayFrontier, undefined)
+    assert.equal(catalog.summaryAttempt?.reason, "needs_native_fallback")
+    assert.equal(calls, 2)
+    assert.equal((await compactV2Context({ sessionID: event.sessionID, messages: [...messages] }, input)).reason,
+        "needs-native-fallback")
+    assert.equal(calls, 2, "unchanged fallback must not bill the handoff again")
 })
 
 test("V2 provider usage includes cached and reasoning tokens; below-trigger usage does not invent local overhead", async (t) => {

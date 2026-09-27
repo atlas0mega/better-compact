@@ -11,7 +11,8 @@ import { validateRequestTransform } from "./safety"
 
 export interface V2ContextOutcome {
     status: "below-trigger" | "disabled" | "unknown-limit" | "declined" | "applied"
-    reason?: "system-update" | "no-plan" | "no-delta" | "replay-frontier-missing" | "unsafe-transform" | "non-saving-transform"
+    reason?: "system-update" | "no-plan" | "no-delta" | "replay-frontier-missing" | "unsafe-transform" |
+        "non-saving-transform" | "needs-native-fallback"
     beforeTokens?: number
     afterTokens?: number
     candidateTokens?: number
@@ -20,6 +21,9 @@ export interface V2ContextOutcome {
     handoffVisible?: boolean
     triggerTokens?: number
     targetTokens?: number
+    /** Whole canonical provider messages, starting at the earliest protected
+     * user/system/replay boundary, for an optional selective native fallback. */
+    protectedTailMessages?: number
 }
 
 export type V2ContextPhase = "identity" | "estimate" | "plan-build" | "plan-transform" |
@@ -113,6 +117,9 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
     projectRoot: string
     contextLimit: number | undefined
     providerReportedTokens?: number
+    /** Host preflight threshold. No outgoing request or checkpoint is committed
+     * if even the validated candidate cannot fit beneath this ceiling. */
+    fallbackCeiling?: number
     config: PluginConfig
     spec?: LadderSpec
     summary?: {
@@ -155,7 +162,8 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
     const triggerTokens = input.config.compaction.triggerTokens ?? Math.floor(input.contextLimit * profile.triggerPercent / 100)
     const targetTokens = input.config.compaction.targetTokens ?? Math.floor(input.contextLimit * profile.targetPercent / 100)
     const providerTokens = input.providerReportedTokens
-    if ((providerTokens ?? beforeTokens) < triggerTokens && beforeTokens < input.contextLimit)
+    if ((providerTokens ?? beforeTokens) < triggerTokens && beforeTokens < input.contextLimit &&
+        (input.fallbackCeiling === undefined || beforeTokens < input.fallbackCeiling))
         return { status: "below-trigger", beforeTokens, triggerTokens, targetTokens }
     if (headTokens >= input.contextLimit) return { status: "declined", reason: "system-update",
         beforeTokens, triggerTokens, targetTokens }
@@ -199,6 +207,14 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
     const frontier = firstArchive ? anchor + 1 : turns.length
     const planningTurns = turns.slice(0, frontier)
     const rawSinceReplay = active.slice(frontier)
+    const latestHuman = original.findLastIndex((message) => message.role === "user")
+    const authorityOrHuman = latestHuman > barrier ? latestHuman : Math.max(0, barrier)
+    // Native checkpoints are replay boundaries too. After a checkpoint, the
+    // *whole* subsequently appended cohort (not merely the newest human
+    // prompt) is protected, including newer encrypted assistant reasoning.
+    const nativeCheckpoint = original.findLastIndex((message) => message.content.some((part) => part.type === "compaction"))
+    const protectedTailMessages = original.length - Math.min(authorityOrHuman, immutableHead.length + frontier,
+        nativeCheckpoint < 0 ? original.length : nativeCheckpoint + 1)
     const options: BuildPlanInputs = {
         sessionKey: event.sessionID,
         // The catalog indexes exact seven-day delta archives. A cumulative
@@ -212,7 +228,8 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
         // The full request has already crossed the trigger. A replay prefix
         // alone may now sit below the trigger (especially on a later, larger
         // model window); still reconstruct its archived transform.
-        force: beforeTokens >= input.contextLimit || !!firstArchive || immutableHead.length > 0,
+        force: beforeTokens >= input.contextLimit || !!firstArchive || immutableHead.length > 0 ||
+            input.fallbackCeiling !== undefined && beforeTokens >= input.fallbackCeiling,
         // No unvalidated fallback prose: only the separate validated model
         // handoff path may consolidate assistant decisions.
         prefixSummaryAllowed: false,
@@ -231,7 +248,8 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
     }
     input.trace?.("plan-build")
     const plan = buildPlan(planningTurns, options, spec)
-    if (!plan) return { status: "declined", reason: "no-plan", beforeTokens, triggerTokens, targetTokens }
+    if (!plan) return { status: "declined", reason: "no-plan", beforeTokens, triggerTokens, targetTokens,
+        protectedTailMessages }
     input.trace?.("plan-transform")
     const transformed = transformTurns(planningTurns, 0, plan, spec)
     input.trace?.("plan-decode")
@@ -264,11 +282,12 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
     // archive would incorrectly become the replay boundary next request.
     if (!cheapValid && !possibleHandoff && !priorCheckpointSameAuthority)
         return { status: "declined", reason: safeCheap ? "non-saving-transform" : "unsafe-transform",
-            beforeTokens, afterTokens, validationFailure, triggerTokens, targetTokens }
+            beforeTokens, afterTokens, validationFailure, triggerTokens, targetTokens, protectedTailMessages }
     input.trace?.("plan-delta")
     const covered = new Set(plan.transcript.messageIds)
     const delta = active.filter((message) => message.id && covered.has(message.id))
-    if (!delta.length) return { status: "declined", reason: "no-delta", beforeTokens, afterTokens, triggerTokens, targetTokens }
+    if (!delta.length) return { status: "declined", reason: "no-delta", beforeTokens, afterTokens, triggerTokens, targetTokens,
+        protectedTailMessages }
     // Commit exact originals before the first model request mentions the
     // transcript pointer. Failure aborts the mutation entirely.
     input.trace?.("archive-expiry")
@@ -286,6 +305,9 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
     let chosen = cheapValid && !activeCheckpoint ? output : original
     let chosenTokens = cheapValid && !activeCheckpoint ? afterTokens : beforeTokens
     let selectedStrategy: V2ContextOutcome["selectedStrategy"] = chosen === output ? "cheap" : undefined
+    let pendingCheckpoint: { rangeHash: string; archiveID: string; handoff: string; description: string;
+        recentUserIntent: string[]; authorityKey?: string } | undefined
+    let pendingCheckpointCalls = 0
     const checkpointEntry = activeCheckpoint && catalog.entries.find((item) =>
         item.id === activeCheckpoint.archiveID && item.status === "ready")
     const checkpointBoundary = checkpointEntry
@@ -351,7 +373,8 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
         const summaryEntry = newCohort
             ? await appendV2Archive(input.projectRoot, event.sessionID, summarySource, originals, authorityKey)
             : entry
-        if (newCohort && !summaryEntry) return { status: "declined", reason: "no-delta", beforeTokens, afterTokens, triggerTokens, targetTokens }
+        if (newCohort && !summaryEntry) return { status: "declined", reason: "no-delta", beforeTokens, afterTokens,
+            triggerTokens, targetTokens, protectedTailMessages }
         const retirement = !summaryCached && activeCheckpoint && summaryEntry && catalog.entries
             .some((item) => item.authorityKey === authorityKey && item.sequence < summaryEntry.sequence) && catalog.entries
             .filter((item) => item.authorityKey === authorityKey && item.sequence < summaryEntry.sequence)
@@ -394,10 +417,11 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
                 let safe = false
                 try { validateRequestTransform(original, candidate, { archivedHumanIds: retired }); safe = true } catch { /* keep cheap plan */ }
                 if (safe && tokens < beforeTokens && (tokens < chosenTokens || !!activeCheckpoint)) {
-                    if (!summaryCached && summaryEntry && "description" in result) await saveV2Checkpoint(input.projectRoot, event.sessionID, {
+                    if (!summaryCached && summaryEntry && "description" in result) pendingCheckpoint = {
                         rangeHash: summaryKey, archiveID: summaryEntry.id, handoff: result.handoff,
                         description: result.description, recentUserIntent, authorityKey,
-                    })
+                    }
+                    if (pendingCheckpoint && "calls" in result) pendingCheckpointCalls = result.calls
                     chosen = candidate
                     chosenTokens = tokens
                     selectedStrategy = summaryCached ? "checkpoint" : "new-handoff"
@@ -411,8 +435,18 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
             rangeHash: summaryKey, archiveID: summaryEntry.id, reason: result.reason, calls: result.calls, authorityKey,
         })
     }
+    if (input.fallbackCeiling !== undefined && chosenTokens >= input.fallbackCeiling) {
+        if (pendingCheckpoint) await recordV2SummaryFailure(input.projectRoot, event.sessionID, {
+            rangeHash: pendingCheckpoint.rangeHash, archiveID: pendingCheckpoint.archiveID,
+            reason: "needs_native_fallback", calls: pendingCheckpointCalls, authorityKey,
+        })
+        return { status: "declined", reason: "needs-native-fallback", beforeTokens,
+            afterTokens: chosenTokens, candidateTokens: afterTokens, triggerTokens, targetTokens, protectedTailMessages }
+    }
     if (chosen === original) return { status: "declined", reason: safeCheap ? "non-saving-transform" : "unsafe-transform",
-        beforeTokens, afterTokens: chosenTokens, candidateTokens: afterTokens, validationFailure, triggerTokens, targetTokens }
+        beforeTokens, afterTokens: chosenTokens, candidateTokens: afterTokens, validationFailure, triggerTokens, targetTokens,
+        protectedTailMessages }
+    if (pendingCheckpoint) await saveV2Checkpoint(input.projectRoot, event.sessionID, pendingCheckpoint)
     const newAuthorityEpoch = !!previousCatalog.replayFrontier && !sameAuthority
     if (!previousCatalog.replayFrontier || selectedStrategy === "new-handoff" || newAuthorityEpoch) {
         input.trace?.("catalog")
@@ -424,6 +458,7 @@ export async function compactV2Context(event: Pick<SessionContext, "sessionID" |
     input.trace?.("commit")
     event.messages.splice(0, event.messages.length, ...restoreV2Messages(chosen, originals))
     return { status: "applied", beforeTokens, afterTokens: chosenTokens, triggerTokens, targetTokens, selectedStrategy,
+        protectedTailMessages,
         handoffVisible: chosen.some((message) => message.content.some((part) => part.type === "text" &&
             part.text.includes("## Decisions") && part.text.includes("## Next step"))) }
 }

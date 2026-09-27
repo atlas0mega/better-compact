@@ -263,7 +263,8 @@ export async function recordV2SummaryFailure(root: string, sessionID: string, in
 }): Promise<void> {
     return withCatalogLock(root, sessionID, async () => {
     if (!/^[a-f0-9]{16}$/.test(input.rangeHash) ||
-        !["input_does_not_fit", "transport_error", "invalid_output", "valid_but_not_smaller"].includes(input.reason) ||
+        !["input_does_not_fit", "transport_error", "invalid_output", "valid_but_not_smaller",
+            "needs_native_fallback"].includes(input.reason) ||
         !Number.isSafeInteger(input.calls) || input.calls < 0 || input.calls > 7)
         throw new Error("Invalid summary failure metadata")
     const catalog = await loadV2Catalog(root, sessionID)
