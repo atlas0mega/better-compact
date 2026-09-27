@@ -15,11 +15,6 @@
             "default": true,
             "description": "Enable or disable the Better Compact plugin"
         },
-        "autoUpdate": {
-            "type": "boolean",
-            "default": false,
-            "description": "Automatically update npm-installed Better Compact when a newer npm latest version is available. Version-locked plugin specs are not updated."
-        },
         "debug": {
             "type": "boolean",
             "default": false,
@@ -60,7 +55,7 @@
                     "type": "string",
                     "enum": ["inherit", "low", "medium", "high", "max", "off"],
                     "default": "inherit",
-                    "description": "Reasoning effort for scratch summaries. Unsupported effort levels fall back to the model default."
+                    "description": "Reasoning effort for V2 generated handoffs. An unavailable requested variant leaves the request intact."
                 },
                 "summaryModel": {
                     "type": ["string", "null"],
@@ -104,7 +99,7 @@
                             "minimum": 1,
                             "maximum": 16,
                             "default": 4,
-                            "description": "Advanced maximum number of scratch summarizer sessions to run in parallel."
+                            "description": "Maximum concurrent V2 source-evidence calls (up to five per boundary)."
                         },
                         "prefixSummary": {
                             "type": "boolean",
@@ -268,14 +263,14 @@
         },
         "compress": {
             "type": "object",
-            "description": "Better Compact command settings",
+            "description": "Better Compact request and manual checkpoint policy",
             "additionalProperties": false,
             "properties": {
                 "permission": {
                     "type": "string",
                     "enum": ["ask", "allow", "deny"],
                     "default": "allow",
-                    "description": "Permission mode for Better Compact commands"
+                    "description": "Only allow runs V2 compaction; ask and deny fail closed rather than bypassing host permissions."
                 }
             },
             "default": {

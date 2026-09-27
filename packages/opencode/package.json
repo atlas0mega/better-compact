@@ -1,7 +1,7 @@
 {
     "$schema": "https://json.schemastore.org/package.json",
     "name": "better-compact",
-    "version": "0.2.9",
+    "version": "0.3.0",
     "type": "module",
     "description": "OpenCode plugin that improves long-session context with boundary-time pruning",
     "main": "./dist/index.js",
@@ -11,27 +11,27 @@
             "types": "./dist/index.d.ts",
             "import": "./dist/index.js"
         },
-        "./server": {
-            "types": "./dist/index.d.ts",
-            "import": "./dist/index.js"
-        },
         "./tui": {
             "types": "./dist/tui.d.ts",
             "import": "./dist/tui.js"
+        },
+        "./rpc": {
+            "types": "./dist/rpc.d.ts",
+            "import": "./dist/rpc.js"
         }
     },
     "scripts": {
         "clean": "rm -rf dist",
-        "build": "pnpm run clean && tsup && tsc --emitDeclarationOnly",
+        "build": "pnpm run clean && tsup",
         "verify:package": "node scripts/verify-package.mjs",
         "verify:release": "node scripts/verify-release.mjs",
         "smoke:install": "node scripts/smoke-opencode-install.mjs",
+        "smoke:host": "node scripts/smoke-v2-host.mjs",
         "check:package": "pnpm run build && pnpm run verify:package",
         "prepublishOnly": "pnpm run check:package",
         "dev": "opencode plugin dev",
         "typecheck": "tsc --noEmit",
-        "test": "node --import tsx --import ./tests/setup.ts --test tests/*.test.ts",
-        "test:tui": "bun --bun test --preload @opentui/solid/runtime-plugin-support ./tests/tui-layout.visual.tsx ./tests/tui-progress-channel.visual.tsx ./tests/tui-command.visual.ts ./tests/global-settings.visual.ts"
+        "test": "node --import tsx --test tests/v2-*.test.ts"
     },
     "keywords": [
         "opencode",
@@ -54,42 +54,33 @@
     "author": "AshishKumar4",
     "license": "AGPL-3.0-or-later",
     "engines": {
-        "opencode": ">=1.17.13 <2"
+        "opencode": ">=2.0.18 <3"
     },
     "publishConfig": {
         "access": "public"
     },
-    "peerDependencies": {
-        "@opencode-ai/plugin": ">=1.17.13 <2",
-        "@opentui/core": ">=0.4.2",
-        "@opentui/solid": ">=0.4.2"
-    },
-    "peerDependenciesMeta": {
-        "@opentui/core": {
-            "optional": true
-        },
-        "@opentui/solid": {
-            "optional": true
-        }
+    "dependencies": {
+        "@opencode/ai": "2.0.18",
+        "@opencode/plugin": "2.0.18"
     },
     "devDependencies": {
         "@better-compact/core": "workspace:*",
-        "@opencode-ai/plugin": "^1.17.13",
-        "@opencode-ai/sdk": "^1.17.13",
-        "@opentui/core": "^0.4.2",
-        "@opentui/solid": "^0.4.2",
+        "@opencode/ai": "2.0.18",
+        "@opencode/plugin": "2.0.18",
         "@types/node": "^25.5.0",
         "jsonc-parser": "^3.3.1",
-        "solid-js": "^1.9.12",
         "tsup": "^8.5.1",
         "tsx": "^4.21.0",
         "typescript": "^6.0.2"
     },
     "files": [
+        "index.js",
         "dist/index.js",
         "dist/index.d.ts",
         "dist/tui.js",
         "dist/tui.d.ts",
+        "dist/rpc.js",
+        "dist/rpc.d.ts",
         "better-compact.schema.json",
         "README.md",
         "LICENSE"

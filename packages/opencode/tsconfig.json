@@ -10,9 +10,10 @@
         "declaration": true,
         "declarationMap": false,
         "sourceMap": false,
+        "ignoreDeprecations": "6.0",
         "jsx": "react-jsx",
         "jsxImportSource": "@opentui/solid"
     },
-    "include": ["index.ts", "tui.tsx", "lib/**/*"],
+    "include": ["index.ts", "tui.ts", "rpc.ts", "lib/v2/**/*", "lib/private-storage.ts"],
     "exclude": ["node_modules", "dist", "logs"]
 }

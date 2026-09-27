@@ -96,7 +96,9 @@ export const reasoningStage: Stage = {
         stripAssistantItems(
             working,
             ctx.rawTailStartIndex,
-            (item) => item.kind === "reasoning" && !ctx.preservedReasoningItemKeys.has(item.key),
+            (item) => item.kind === "reasoning" &&
+                !ctx.preservedReasoningItemKeys.has(item.key) &&
+                !ctx.conventions.isPreservedItem?.(item),
         ),
 }
 
