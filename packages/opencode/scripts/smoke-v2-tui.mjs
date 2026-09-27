@@ -27,6 +27,7 @@ try {
     let output = ""
     let commandSent = false
     let commandDiscovered = false
+    let complete
     const onData = (chunk) => {
         output = (output + String(chunk)).slice(-150_000)
         if (!commandSent && output.includes("plugin reconciliation completed")) {
@@ -38,12 +39,14 @@ try {
             setTimeout(() => child.stdin.write("\r"), 250)
             setTimeout(() => child.stdin.write("\r"), 800)
         }
+        if (output.includes("Open a session first")) complete?.()
     }
     child.stdout.on("data", onData)
     child.stderr.on("data", onData)
     await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => resolve(), 10_000)
-        child.once("error", reject)
+        const timeout = setTimeout(resolve, 25_000)
+        complete = () => { clearTimeout(timeout); resolve() }
+        child.once("error", (error) => { clearTimeout(timeout); reject(error) })
         child.once("exit", (code) => { clearTimeout(timeout); reject(new Error(`V2 TUI exited prematurely: ${code}`)) })
     })
     const transcript = await readFile(log, "utf8")
