@@ -102,18 +102,21 @@ try {
         const server = createTcpServer()
         server.listen(0, "127.0.0.1", () => { const value = server.address().port; server.close(() => resolve(value)) })
     })
-    host = spawn(executable, ["serve", "--hostname", "127.0.0.1", "--port", String(apiPort)],
-        { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] })
-    await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Private native-fallback server did not start")), 30_000)
-        host.once("error", reject)
-        host.once("exit", (code) => reject(new Error(`Private native-fallback server exited ${code}`)))
-        host.stdout.on("data", (chunk) => {
-            if (!String(chunk).includes("server listening")) return
-            clearTimeout(timeout)
-            resolve()
+    const startHost = async () => {
+        host = spawn(executable, ["serve", "--hostname", "127.0.0.1", "--port", String(apiPort)],
+            { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] })
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error("Private native-fallback server did not start")), 30_000)
+            host.once("error", reject)
+            host.once("exit", (code) => reject(new Error(`Private native-fallback server exited ${code}`)))
+            host.stdout.on("data", (chunk) => {
+                if (!String(chunk).includes("server listening")) return
+                clearTimeout(timeout)
+                resolve()
+            })
         })
-    })
+    }
+    await startHost()
     const address = `http://127.0.0.1:${apiPort}`
     const sessionID = JSON.parse(await run(project, env, ["api", "--server", address, "post", "/api/session", "--data",
         '{"title":"Native fallback smoke"}'])).data?.id
@@ -157,6 +160,17 @@ try {
     if (stored?.lastStatus === "error") throw new Error(`Better Compact failed in private host: ${stored.reason}`)
     const log = await readFile(path.join(sandbox, "data", "opencode", "log", "opencode.log"), "utf8").catch(() => "")
     if (!log.includes("better-compact")) throw new Error("Private V2 host did not activate Better Compact")
+    const stopped = new Promise((resolve) => host.once("exit", resolve))
+    host.kill()
+    await stopped
+    await startHost()
+    await run(project, env, ["run", "--server", address, "--session", sessionID, "--model", "openai/fixture",
+        "Resume after restart; retain the original constraint and encrypted checkpoint."])
+    const restarted = JSON.stringify(primary.at(-1)?.input)
+    if (checkpoints.length !== 1 || !restarted.includes("encrypted-native-fixture") ||
+        !restarted.includes("Never overwrite user files") || !restarted.includes("Resume after restart") ||
+        restarted.includes("Old implementation detail"))
+        throw new Error("Native fallback replay or human constraints were lost across a server restart")
     const rejectedID = JSON.parse(await run(project, env, ["api", "--server", address, "post", "/api/session", "--data",
         '{"title":"Reject selective native range"}'])).data?.id
     if (!rejectedID) throw new Error("No rejection fixture session was created")
@@ -171,7 +185,7 @@ try {
     if (primary.length !== primariesBefore || checkpoints.length !== checkpointsBefore + 1 ||
         rejectedHistory.some((message) => message.info?.type === "compaction" && message.info?.status === "completed"))
         throw new Error("An invalid native range was retried as a flattened checkpoint or raw primary request")
-    console.log("Private host: native checkpoint before the second primary; encrypted replay, human constraints and exact recoverable archive verified.")
+    console.log("Private host: native prefix checkpoint, encrypted replay across restart, human constraints and exact recoverable archive verified.")
 } finally {
     if (host && host.exitCode === null && host.signalCode === null) {
         const stopped = new Promise((resolve) => host.once("exit", resolve))
